@@ -36,13 +36,35 @@ export const TUNING = {
   // Shipping Pipeline: ONE global farm-wide processing queue (GameState.
   // processingQueue), not one per Field — buying more Fields increases
   // production but never speeds up the shared shipping line. Seconds the
-  // queue's head item spends processing before it ships and pays out.
-  // Tunable here for easy human playtesting.
-  PROCESSING_SECONDS_PER_APPLE: 1.0,
-  // Closing (see Game.beginClosing) accelerates the same queue to this much
-  // faster a cadence so a typical remaining queue finishes in roughly a
-  // couple of seconds instead of trickling in at the normal daytime rate.
-  FINAL_SHIPMENT_SECONDS_PER_APPLE: 0.12,
+  // queue's head item spends processing before it ships and pays out is now
+  // driven by the Shipping Speed upgrade level (SHIPPING_SPEED_LEVELS
+  // below) rather than a fixed constant — see Game.shippingCadenceSeconds().
+
+  // Shipping Infrastructure V1 (see PROJECT.md "Shipping Infrastructure"):
+  // PACKING = the finite processingQueue capacity. Index 0 = Level 1.
+  // *_UPGRADE_COSTS[i] is the cost to go from Level i+1 to Level i+2 (i.e.
+  // costs[0] = Lv1->Lv2 price), one entry shorter than the level table
+  // since Level 1 is owned by default and MAX has no further upgrade.
+  PACKING_CAPACITY_LEVELS: [12, 18, 24, 32, 40] as const,
+  PACKING_CAPACITY_UPGRADE_COSTS: [150, 350, 700, 1200] as const,
+  PACKING_MAX_LEVEL: 5,
+
+  // SHIPPING SPEED = seconds the queue's head item spends processing per
+  // apple during normal (non-Closing) play. Closing's own faster Final
+  // Shipment cadence is always derived from whichever of these is currently
+  // active (see FINAL_SHIPMENT_CADENCE_MIN/MULT below and
+  // Game.finalShipmentCadenceSeconds()) rather than being a separate table.
+  SHIPPING_SPEED_LEVELS: [1.0, 0.8, 0.65, 0.52, 0.42] as const,
+  SHIPPING_SPEED_UPGRADE_COSTS: [200, 450, 900, 1600] as const,
+  SHIPPING_SPEED_MAX_LEVEL: 5,
+
+  // Closing (see Game.beginClosing/finalShipmentCadenceSeconds) accelerates
+  // the same queue to max(FINAL_SHIPMENT_CADENCE_MIN, normalCadence *
+  // FINAL_SHIPMENT_CADENCE_MULT) so a typical remaining queue finishes in
+  // roughly a couple of seconds instead of trickling in at the normal
+  // daytime rate, while still rewarding a faster owned Shipping Speed level.
+  FINAL_SHIPMENT_CADENCE_MIN: 0.08,
+  FINAL_SHIPMENT_CADENCE_MULT: 0.2,
 
   STARTING_CASH: 50,
 

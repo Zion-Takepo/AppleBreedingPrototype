@@ -15,11 +15,16 @@ import {
   activeSlotIndices,
   allSlotsActive,
   fairCompositeScore,
+  finalShipmentCadenceSeconds,
   fruitRegrowSeconds,
   makeInitialFruitSlots,
   operatingCost,
+  packingCapacityForLevel,
+  packingUpgradeCost,
   pickNextProductiveSlot,
   priceHarvestedApple,
+  shippingCadenceForLevel,
+  shippingSpeedUpgradeCost,
   sweetnessContestScore,
 } from './systems/economy.ts';
 import { advanceDailyMarket, initVisualMarket, initVisualMarketEntry } from './systems/market.ts';
@@ -90,6 +95,8 @@ function createInitialState(): GameState {
     },
     irrigationLevel: 0,
     shippingLevel: 0,
+    packingCapacityLevel: 1,
+    shippingSpeedLevel: 1,
     // Day 1 starts every already-discovered Visual Variety safely at
     // baseline/STABLE — its first real Market update happens at the Day
     // 1->2 transition (see advanceDayInternal), never here.
@@ -119,6 +126,11 @@ export type GameEvent =
   | { type: 'traitDiscovered' }
   | { type: 'dayClosed' }
   | { type: 'specimenAcquired'; specimen: BreedingSpecimen }
+  // A normal (non-Specimen) ripe fruit was clicked/swept while the Packing
+  // Box was already full — see PROJECT.md "Shipping Infrastructure". Fired
+  // from harvestFruitSlot; UI listeners should throttle their own feedback
+  // since a hold-and-sweep drag can trigger this repeatedly in one gesture.
+  | { type: 'packingFull' }
   | { type: 'changed' };
 
 type Listener = (event: GameEvent) => void;
@@ -332,12 +344,27 @@ export class Game {
     if (changed) this.notify();
   }
 
-  // Normal daytime Shipping stays TUNING.PROCESSING_SECONDS_PER_APPLE
-  // (1.0s/apple); Closing (state.closing) switches the SAME queue to the
-  // faster TUNING.FINAL_SHIPMENT_SECONDS_PER_APPLE cadence — never a second
-  // queue, never a pricing change.
+  // Normal daytime Shipping runs at the currently-owned Shipping Speed
+  // level's cadence; Closing (state.closing) switches the SAME queue to the
+  // faster, derived Final Shipment cadence — never a second queue, never a
+  // pricing change (see PROJECT.md "Shipping Infrastructure").
   private processingCadenceSeconds(): number {
-    return this.state.closing ? TUNING.FINAL_SHIPMENT_SECONDS_PER_APPLE : TUNING.PROCESSING_SECONDS_PER_APPLE;
+    return this.state.closing ? this.currentFinalShipmentCadenceSeconds() : this.shippingCadenceSeconds();
+  }
+
+  /** Current normal (non-Closing) per-apple processing cadence, seconds — driven by the owned Shipping Speed level. */
+  shippingCadenceSeconds(): number {
+    return shippingCadenceForLevel(this.state.shippingSpeedLevel);
+  }
+
+  /** Current Final Shipment (Closing) cadence — max(FINAL_SHIPMENT_CADENCE_MIN, shippingCadenceSeconds() * FINAL_SHIPMENT_CADENCE_MULT); see PROJECT.md section 12. */
+  private currentFinalShipmentCadenceSeconds(): number {
+    return finalShipmentCadenceSeconds(this.shippingCadenceSeconds());
+  }
+
+  /** Current Packing Box capacity — the finite processingQueue length cap (see PROJECT.md "Shipping Infrastructure"). */
+  packingCapacity(): number {
+    return packingCapacityForLevel(this.state.packingCapacityLevel);
   }
 
   private resolveBreeding(): void {
@@ -536,14 +563,25 @@ export class Game {
    * multipliers — see `priceHarvestedApple`) and pushed onto the ONE shared
    * farm-wide `state.processingQueue`; it ships (and actually pays out)
    * later, from `update()`, once it reaches the front of that queue.
+   *
+   * A normal (non-Specimen) apple can only enter the queue while it has
+   * free Packing capacity (see PROJECT.md "Shipping Infrastructure",
+   * `packingCapacity()`) — if it's already full, this is a no-op: the
+   * exact fruit stays ripe on its exact slot (no regrow-slot rotation, no
+   * queue item, no revenue), a `'packingFull'` event fires for UI feedback,
+   * and this returns false. A Specimen is NEVER capacity-gated. Returns
+   * true iff the fruit was actually removed from the tree (either into the
+   * Specimen inventory or the processing queue) — callers (the Orchard's
+   * click/sweep visuals in particular) use this to decide whether to play
+   * the harvest-pop animation at all.
    */
-  harvestFruitSlot(fieldId: number, slotIndex: number): void {
+  harvestFruitSlot(fieldId: number, slotIndex: number): boolean {
     const field = this.getField(fieldId);
-    if (!field || !field.varietyId) return;
+    if (!field || !field.varietyId) return false;
     const slot = field.slots[slotIndex];
-    if (!slot || !slot.active || !slot.ripe) return;
+    if (!slot || !slot.active || !slot.ripe) return false;
     const variety = this.getVariety(field.varietyId);
-    if (!variety) return;
+    if (!variety) return false;
 
     // Captured before this slot's own specimen field is cleared below —
     // this is the ONE path every harvest route (direct click/sweep,
@@ -551,6 +589,14 @@ export class Game {
     // Specimen is preserved into the inventory identically no matter which
     // route reached it (see PROJECT.md section 8).
     const specimen = slot.specimen;
+
+    // Packing Capacity gate — Specimens are exempt (see PROJECT.md
+    // "Shipping Infrastructure" section 3). Checked BEFORE any mutation so
+    // a blocked normal apple is left in every respect exactly as it was.
+    if (!specimen && this.state.processingQueue.length >= this.packingCapacity()) {
+      this.emit({ type: 'packingFull' });
+      return false;
+    }
 
     slot.ripe = false;
     slot.active = false;
@@ -570,7 +616,7 @@ export class Game {
       this.state.specimens.push(specimen);
       this.emit({ type: 'specimenAcquired', specimen });
       this.notify();
-      return;
+      return true;
     }
 
     const { value, baseValue } = priceHarvestedApple(variety, field, this.state);
@@ -583,6 +629,7 @@ export class Game {
     }
 
     this.notify();
+    return true;
   }
 
   plantVariety(fieldId: number, varietyId: string): void {
@@ -654,6 +701,43 @@ export class Game {
       this.state.cash -= price;
       this.state.shippingLevel += 1;
     }
+    this.notify();
+    return true;
+  }
+
+  /**
+   * Permanent Packing Capacity upgrade (see PROJECT.md "Shipping
+   * Infrastructure" section 9) — deducts the exact cost immediately,
+   * persists the new level, never refunds, never exceeds
+   * TUNING.PACKING_MAX_LEVEL. Never touches Operating Cost, and never
+   * deletes/truncates existing processingQueue items even though it can
+   * only ever grow capacity. Purchasing itself is instantaneous — no game
+   * time is consumed (see PROJECT.md section 15).
+   */
+  buyPackingCapacityUpgrade(): boolean {
+    const cost = packingUpgradeCost(this.state.packingCapacityLevel);
+    if (cost === null || this.state.cash < cost) return false;
+    this.state.cash -= cost;
+    this.state.packingCapacityLevel += 1;
+    this.notify();
+    return true;
+  }
+
+  /**
+   * Permanent Shipping Speed upgrade (see PROJECT.md "Shipping
+   * Infrastructure" section 10) — same purchasing rules as
+   * buyPackingCapacityUpgrade. Deliberately does NOT touch
+   * `processingTimer`: a mid-processing head item already has its own
+   * remaining-time countdown running (see update()'s Shipping drain), and
+   * the new, faster cadence is only read the next time an interval is
+   * scheduled (`processingCadenceSeconds()`/shippingCadenceSeconds()), so
+   * the currently-running item is never retroactively rescaled.
+   */
+  buyShippingSpeedUpgrade(): boolean {
+    const cost = shippingSpeedUpgradeCost(this.state.shippingSpeedLevel);
+    if (cost === null || this.state.cash < cost) return false;
+    this.state.cash -= cost;
+    this.state.shippingSpeedLevel += 1;
     this.notify();
     return true;
   }
@@ -900,29 +984,83 @@ export class Game {
    * (dayTimeRemaining hits 0, see update()) and by a manual END DAY click,
    * always through this exact same method. Idempotent: a second call while
    * already closing/ended is a no-op, so repeated clicks/calls can never
-   * collect or pay twice. Freezes growth immediately (state.closing also
-   * gates the regrow loop in update()), then collects every currently-ripe
-   * fruit slot across all unlocked/planted Fields through the SAME
-   * harvestFruitSlot() path normal harvesting uses — no alternate pricing
-   * path, and partially-grown fruit is left untouched, never force-ripened.
+   * collect or pay twice. See PROJECT.md "Shipping Infrastructure" sections
+   * 6-8 for the full capacity-aware sequence this implements:
+   *
+   *  1. Freezes growth immediately (state.closing also gates the regrow
+   *     loop in update()) — partially-grown fruit is left untouched, never
+   *     force-ripened.
+   *  2. Secures every currently-ripe Specimen across all unlocked/planted
+   *     Fields FIRST, through the same harvestFruitSlot() path normal
+   *     harvesting uses — Packing Capacity never applies to a Specimen, so
+   *     this can never be blocked by a full queue.
+   *  3. ONE normal-fruit collection pass: computes the Packing Box's
+   *     currently-free slots (capacity minus whatever's already queued),
+   *     ranks every remaining ripe normal apple by its CURRENT harvest sale
+   *     value (highest first, ties broken by field order then slot index —
+   *     both already the natural iteration/array order below, and
+   *     Array.sort is stable), and harvests only that many, highest-value
+   *     first. Any normal ripe apple that doesn't fit stays ripe on its
+   *     exact slot, untouched, and survives into the next day (see
+   *     PROJECT.md section 8 — it is priced at whatever Market rate is
+   *     current WHEN it's eventually actually harvested, never today's).
+   *
    * Collected fruit joins the existing shared Processing Queue; update()
    * then drains it at the accelerated Final Shipment cadence
    * (processingCadenceSeconds) and calls finishClosing() once it's empty —
    * settlement itself is deliberately NOT done here, so Final Shipment
-   * revenue is always included before the day's summary is computed.
+   * revenue is always included before the day's summary is computed. This
+   * is a single collection pass only: nothing here ever goes back to the
+   * trees for a second round after the queue drains (see finishClosing),
+   * which is what keeps Packing Capacity meaningful during Closing instead
+   * of a repeated collect-then-flush loop erasing it.
    */
   beginClosing(): boolean {
     if (this.state.closing || this.state.dayEnded) return false;
     this.state.dayActive = false;
     this.state.closing = true;
 
+    // A still-running normal-cadence head timer is clamped DOWN to the
+    // (faster) Final Shipment cadence the instant Closing begins — never
+    // lengthened if it was already shorter (see PROJECT.md section 12).
+    if (this.state.processingQueue.length > 0) {
+      this.state.processingTimer = Math.min(this.state.processingTimer, this.currentFinalShipmentCadenceSeconds());
+    }
+
+    // STEP 2 — secure every ripe Specimen first, regardless of Packing
+    // capacity (harvestFruitSlot() never capacity-gates a Specimen slot).
     for (const field of this.state.fields) {
       if (!field.unlocked || !field.varietyId) continue;
-      const ripeIndices: number[] = [];
+      const specimenIndices: number[] = [];
       field.slots.forEach((slot, i) => {
-        if (slot.ripe) ripeIndices.push(i);
+        if (slot.ripe && slot.specimen) specimenIndices.push(i);
       });
-      for (const i of ripeIndices) this.harvestFruitSlot(field.id, i);
+      for (const i of specimenIndices) this.harvestFruitSlot(field.id, i);
+    }
+
+    // STEP 3 — ONE normal-fruit collection pass, highest current sale value
+    // first, limited to whatever Packing capacity remains free right now
+    // (see PROJECT.md section 7).
+    const freeSlots = Math.max(0, this.packingCapacity() - this.state.processingQueue.length);
+    if (freeSlots > 0) {
+      const candidates: { fieldId: number; slotIndex: number; value: number }[] = [];
+      for (const field of this.state.fields) {
+        if (!field.unlocked || !field.varietyId) continue;
+        const variety = this.getVariety(field.varietyId);
+        if (!variety) continue;
+        field.slots.forEach((slot, i) => {
+          if (!slot.ripe || slot.specimen) return;
+          const { value } = priceHarvestedApple(variety, field, this.state);
+          candidates.push({ fieldId: field.id, slotIndex: i, value });
+        });
+      }
+      // Descending by value only — Array.sort is stable, so ties keep this
+      // array's own build order, which is already field order then slot
+      // index (deterministic tie-break per PROJECT.md section 7).
+      candidates.sort((a, b) => b.value - a.value);
+      for (const c of candidates.slice(0, freeSlots)) {
+        this.harvestFruitSlot(c.fieldId, c.slotIndex);
+      }
     }
 
     this.notify();

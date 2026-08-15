@@ -63,10 +63,17 @@ function rand(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
-/** Live hook a FruitSlot uses to report an individual harvest upward. */
+/** Live hook a FruitSlot uses to ask the owner to actually harvest it. */
 export interface HarvestHooks {
-  /** Called once, synchronously, each time a fruit is individually popped, with this slot's flat index (0..14) so the owner can apply it to the right Field.slots entry. */
-  onFruitConsumed: (slotIndex: number) => void;
+  /**
+   * Called synchronously on every click/sweep touch of a ripe, not-yet-
+   * harvested fruit, with this slot's flat index (0..14), BEFORE any visual
+   * pop plays. Must return whether the harvest actually happened — false
+   * (e.g. the Packing Box is full; see Game.harvestFruitSlot) means the
+   * fruit stays exactly as it was: FruitSlot skips its pop animation
+   * entirely and the fruit remains revealed/harvestable on the tree.
+   */
+  attemptHarvest: (slotIndex: number) => boolean;
 }
 
 /** One fruit position on a tree: reveal-in animation + occasional wind gust + direct-click/sweep harvest. Its ripe/growing state is driven externally by OrchardTreeLayer.sync() from the field's own per-slot state — this class only owns the visual. */
@@ -129,9 +136,17 @@ class FruitSlot {
   // Click, or hold-and-sweep-over, this specific ripe fruit. Only revealed,
   // fully-settled, not-already-picked fruit qualify. Called both from this
   // slot's own pointerdown (direct click) and externally from
-  // OrchardTreeLayer's global sweep hit-test / harvestAllRemaining.
+  // OrchardTreeLayer's global sweep hit-test / harvestAllRemaining. Asks
+  // the owner FIRST (hooks.attemptHarvest) — Game.harvestFruitSlot can
+  // reject a normal apple while the Packing Box is full (see PROJECT.md
+  // "Shipping Infrastructure"), in which case this must NOT play the pop
+  // animation or mark the fruit consumed: it stays exactly as it was,
+  // still ripe and still harvestable on a later attempt.
   attemptHarvest(): void {
     if (!this.revealed || this.revealing || this.consumed) return;
+
+    const harvested = this.hooks.attemptHarvest(this.index);
+    if (!harvested) return;
 
     this.consumed = true;
     this.revealed = false;
@@ -144,10 +159,6 @@ class FruitSlot {
       duration: HARVEST_POP_MS,
       ease: 'Cubic.easeIn',
     });
-
-    // This fruit is visually gone now; the owner applies the actual
-    // per-slot regrow timer + (possibly) the batched field reward.
-    this.hooks.onFruitConsumed(this.index);
   }
 
   reveal(scene: Phaser.Scene): void {
@@ -290,10 +301,13 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     // onto the shared farm-wide processing queue (see Game.harvestFruitSlot
     // / GameState.processingQueue). Shipment/cash feedback is driven
     // separately, from Game's 'shipment' events (see OrchardScreen).
+    // Game.harvestFruitSlot's own boolean return is passed straight
+    // through so FruitSlot can decline the pop animation when the Packing
+    // Box is full (see PROJECT.md "Shipping Infrastructure").
     const hooks: HarvestHooks = {
-      onFruitConsumed: (slotIndex: number) => {
-        if (!this.currentField) return;
-        this.game.harvestFruitSlot(this.currentField.id, slotIndex);
+      attemptHarvest: (slotIndex: number) => {
+        if (!this.currentField) return false;
+        return this.game.harvestFruitSlot(this.currentField.id, slotIndex);
       },
     };
 

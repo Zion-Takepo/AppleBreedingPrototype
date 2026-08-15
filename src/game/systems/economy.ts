@@ -247,6 +247,38 @@ export function operatingCost(day: number, fieldCount: number): number {
   return TUNING.OPERATING_COST_BASE + fieldCount * TUNING.OPERATING_COST_PER_FIELD + progression;
 }
 
+// ------------------------------------------------------------------
+// Shipping Infrastructure V1 (see PROJECT.md "Shipping Infrastructure") —
+// pure lookups over the two permanent upgrade tracks, level 1-indexed.
+// ------------------------------------------------------------------
+
+/** Packing Box capacity (the finite processingQueue length cap) for a given owned level (1..PACKING_MAX_LEVEL). */
+export function packingCapacityForLevel(level: number): number {
+  return TUNING.PACKING_CAPACITY_LEVELS[level - 1];
+}
+
+/** Cost to upgrade FROM this level to the next, or null if already at PACKING_MAX_LEVEL. */
+export function packingUpgradeCost(level: number): number | null {
+  if (level >= TUNING.PACKING_MAX_LEVEL) return null;
+  return TUNING.PACKING_CAPACITY_UPGRADE_COSTS[level - 1];
+}
+
+/** Normal (non-Closing) per-apple shipping cadence, seconds, for a given owned Shipping Speed level. */
+export function shippingCadenceForLevel(level: number): number {
+  return TUNING.SHIPPING_SPEED_LEVELS[level - 1];
+}
+
+/** Cost to upgrade FROM this Shipping Speed level to the next, or null if already at SHIPPING_SPEED_MAX_LEVEL. */
+export function shippingSpeedUpgradeCost(level: number): number | null {
+  if (level >= TUNING.SHIPPING_SPEED_MAX_LEVEL) return null;
+  return TUNING.SHIPPING_SPEED_UPGRADE_COSTS[level - 1];
+}
+
+/** Final Shipment (Closing) cadence derived from the current normal cadence — never a separately tuned table (see PROJECT.md section 12). */
+export function finalShipmentCadenceSeconds(normalCadenceSeconds: number): number {
+  return Math.max(TUNING.FINAL_SHIPMENT_CADENCE_MIN, normalCadenceSeconds * TUNING.FINAL_SHIPMENT_CADENCE_MULT);
+}
+
 const RARITY_POINTS: Record<string, number> = {
   Red: 0,
   Green: 2,

@@ -252,12 +252,26 @@ export interface GameState {
   // ONE shared farm-wide Shipping/Processing Queue — every Field's harvest
   // feeds this same FIFO (buying more Fields raises production, never the
   // shared line's throughput). `processingTimer` is the seconds remaining
-  // on the head item (index 0); other items simply wait their turn.
+  // on the head item (index 0); other items simply wait their turn. This is
+  // also the Packing Box's physical storage (see PROJECT.md "Shipping
+  // Infrastructure") — its length is finite, capped by
+  // Game.packingCapacity(); a normal apple may only be harvested into this
+  // queue while `processingQueue.length < packingCapacity()` (Specimens
+  // never count against it — see BreedingSpecimen/FieldFruitSlot above).
   processingQueue: ProcessingItem[];
   processingTimer: number;
   breeding: BreedingState;
   irrigationLevel: number;
   shippingLevel: number;
+  // Shipping Infrastructure V1 (see PROJECT.md "Shipping Infrastructure") —
+  // permanent farm upgrades, independent of each other and of the existing
+  // `shippingLevel` sale-value bonus above. Both start at 1 (owned by
+  // default) and cap at their own TUNING MAX_LEVEL. packingCapacityLevel
+  // sets processingQueue's finite capacity; shippingSpeedLevel sets the
+  // queue's normal per-apple processing cadence (see
+  // Game.packingCapacity()/shippingCadenceSeconds()).
+  packingCapacityLevel: number;
+  shippingSpeedLevel: number;
   // Market V1 state — one entry per DISCOVERED Visual Variety (see
   // systems/market.ts). Undiscovered visualIds never get an entry.
   visualMarket: Record<AppleAssetId, VisualMarketEntry>;

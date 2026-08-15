@@ -92,19 +92,24 @@ changes to cultivation, variety, or market never retroactively reprice an
 apple already in the pipeline — and pushed onto **one shared, farm-wide**
 processing queue (`GameState.processingQueue`, an array of
 `{ fieldId, value, baseValue }`; NOT one queue per Field — buying another
-Field raises production but never speeds up the shared shipping line, which
-preserves it as a deliberate future bottleneck for Freshness/processing
-upgrades). Only the queue's head item has an active timer
-(`GameState.processingTimer`); ticked every frame in `Game.update()`
-regardless of day state, matching the Orchard's own continuous-regrow
-policy. `value`/`baseValue` are exact, **unrounded** dollar amounts —
-rounding every individual apple to a whole dollar would swamp small
-Sweetness/Size differences (a $2-4 per-apple range quantized to $1 steps),
-so the queue, `cash`, and `totalRevenue` all carry full fractional
-precision; both `cash` (HUD) and every shipment's own feedback display it
-rounded to exactly two decimal places (`$50.00`, `+$2.75`) rather than a
-whole dollar. Every `TUNING.PROCESSING_SECONDS_PER_APPLE` (1.0s) seconds,
-the head ships automatically: its value pays into `cash`/`totalRevenue`
+Field raises production but never speeds up the shared shipping line). This
+queue is also the **Packing Box**'s physical storage and has a **finite
+capacity** — see "Shipping Infrastructure" below for the capacity gate,
+Closing's capacity-aware collection, and the Packing Capacity / Shipping
+Speed upgrade tracks; this section covers the queue's own draining/pricing
+mechanics, which those build on rather than replace. Only the queue's head
+item has an active timer (`GameState.processingTimer`); ticked every frame
+in `Game.update()` regardless of day state, matching the Orchard's own
+continuous-regrow policy. `value`/`baseValue` are exact, **unrounded**
+dollar amounts — rounding every individual apple to a whole dollar would
+swamp small Sweetness/Size differences (a $2-4 per-apple range quantized to
+$1 steps), so the queue, `cash`, and `totalRevenue` all carry full
+fractional precision; both `cash` (HUD) and every shipment's own feedback
+display it rounded to exactly two decimal places (`$50.00`, `+$2.75`)
+rather than a whole dollar. Every `Game.shippingCadenceSeconds()` seconds
+(driven by the owned Shipping Speed level — Level 1 is 1.0s/apple; see
+"Shipping Infrastructure" below), the head ships automatically: its value
+pays into `cash`/`totalRevenue`
 unconditionally (that money was genuinely earned at harvest time), while
 `baseValue` only adds into `dayHarvestRevenue`/`dayMarketBonus` while
 `!GameState.dayEnded` — once END DAY has settled the current day's summary
@@ -122,10 +127,124 @@ and never filtered to a selected Field since the queue is shared farm-wide
 reused Text that drifts lightly upward and fades, never a stacked list),
 paired with a small scale pulse on the cash total itself. HUD cash also
 updates through its normal periodic refresh, so cash visibly rises in small
-increments as apples ship rather than jumping in a lump sum. The temporary
-shipment-box placeholder (bottom-right of the Orchard view, not yet
-redesigned) shows a live farm-wide queue count for playtesting. Freshness-
+increments as apples ship rather than jumping in a lump sum. The
+shipment-box display (bottom-right of the Orchard view, not yet part of the
+future full redesign) now shows live Packing occupancy/capacity and the
+current Shipping cadence — see "Shipping Infrastructure" below. Freshness-
 based queue-time depreciation is intentionally not part of this pass.
+
+## Shipping Infrastructure
+
+**Implemented.** The Processing Queue above now has a **finite Packing
+Capacity** and a tunable **Shipping Speed**, both permanent, purchasable
+farm upgrades — the core design goal is that growing Yield/production
+eventually pressures logistics instead of Closing's old accelerated Final
+Shipment silently erasing any bottleneck for free. See `Game.ts`
+(`harvestFruitSlot`, `beginClosing`, `buyPackingCapacityUpgrade`,
+`buyShippingSpeedUpgrade`, `packingCapacity`, `shippingCadenceSeconds`),
+`systems/economy.ts` (`packingCapacityForLevel`, `packingUpgradeCost`,
+`shippingCadenceForLevel`, `shippingSpeedUpgradeCost`,
+`finalShipmentCadenceSeconds`), and `TUNING.PACKING_CAPACITY_LEVELS` /
+`TUNING.SHIPPING_SPEED_LEVELS` for the exact tables.
+
+**Packing Capacity** (`GameState.packingCapacityLevel`, 1-5, default 1):
+the maximum length `processingQueue` may hold — 12/18/24/32/40 apples at
+Levels 1-5, upgrade cost $150/$350/$700/$1200 (Lv1->2 through Lv4->5).
+`Game.harvestFruitSlot` checks `processingQueue.length >= packingCapacity()`
+**before** any mutation — a normal ripe apple hitting a full Packing Box is
+a pure no-op: it stays ripe on its exact slot (no slot rotation, no queue
+item, no revenue) and a `'packingFull'` event fires for UI feedback. A
+**Breeding Specimen is always exempt** — the capacity check only applies
+when `slot.specimen` is null, so a ripe Specimen is collectible through the
+identical `harvestFruitSlot` path regardless of Packing occupancy, on every
+route that reaches it (direct click/sweep, HARVEST ALL, Closing).
+
+**Shipping Speed** (`GameState.shippingSpeedLevel`, 1-5, default 1): the
+queue's normal (non-Closing) per-apple processing cadence —
+1.00/0.80/0.65/0.52/0.42 seconds at Levels 1-5, upgrade cost
+$200/$450/$900/$1600. `Game.processingCadenceSeconds()` (private) reads this
+whenever the *next* processing interval is scheduled — buying the upgrade
+mid-day never retroactively rescales whatever timer is already counting
+down on the current head item; only the interval scheduled after it next
+ships uses the new, faster cadence. **Final Shipment** (Closing's
+accelerated drain, replacing the old fixed 0.12s/apple) is now *derived*
+from the currently-owned Shipping Speed level rather than a separate table:
+`max(TUNING.FINAL_SHIPMENT_CADENCE_MIN (0.08), normalCadence *
+TUNING.FINAL_SHIPMENT_CADENCE_MULT (0.20))` — Lv1 ≈0.20s, Lv2 ≈0.16s, Lv3
+≈0.13s, Lv4 ≈0.104s, Lv5 ≈0.084s — so investing in Shipping Speed pays off
+both during normal play and at Closing. If Closing begins while the head
+item's still-running *normal*-cadence timer is slower than the current
+Final Shipment cadence, `beginClosing()` clamps it down to that faster
+cadence once (never lengthens an already-shorter remaining timer) so
+Closing still reads as "accelerated now," without a timer-rewrite scheme
+for the general case.
+
+**Closing's capacity-aware collection sequence** (`Game.beginClosing`,
+replacing the old "collect everything ripe, then flush the whole queue"
+behavior that made Packing Capacity meaningless): growth freezes exactly as
+before, then, in order —
+
+1. **Every currently-ripe Specimen, across every unlocked/planted Field, is
+   secured first** — through the same `harvestFruitSlot` path, so Packing
+   Capacity never applies. No Specimen can ever be lost to Closing.
+2. **ONE normal-fruit collection pass.** `freePackingSlots =
+   packingCapacity() - processingQueue.length` (occupancy AFTER Specimens
+   are secured, which never changes it). Every remaining ripe *normal*
+   apple across all Fields is priced via the existing
+   `priceHarvestedApple` (no second pricing formula), ranked **highest
+   current sale value first**, and only the top `freePackingSlots` are
+   actually harvested into the queue — ties break deterministically by
+   Field order then slot index (`Array.prototype.sort` is stable, and the
+   candidate list is already built in that exact order, so a plain
+   value-descending sort preserves it for ties). Any normal ripe apple that
+   doesn't fit is left **untouched**: still ripe, on its exact slot, not
+   deleted, not counted as revenue — it survives into the next day and
+   blocks that slot from growing new fruit until it's actually harvested.
+3. Final Shipment then drains the queue at the (possibly-clamped)
+   accelerated cadence as before; `finishClosing()` settles Operating Cost
+   and the day log exactly as before, completely unchanged by this pass.
+
+This is a **single collection pass** — once Final Shipment empties the
+queue, nothing goes back to the trees for a second round that same Closing,
+which is what keeps Packing Capacity meaningful (otherwise a
+collect-12-then-flush loop could still drain an unbounded crop for free).
+A carried-over ripe apple's sale value is **not** locked at the Closing
+day's Market rate, since it was never actually harvested — when it's
+eventually harvested (any later day), it uses whichever Market rate is
+current *at that moment*, then locks in normally like any other harvest.
+
+**UI** (`ui/OrchardScreen.ts`'s shipment-box display, `ui/ShippingInfraModal.ts`):
+the existing placeholder box now reads `PACKING 8/12` / `1.00s / apple` and
+is clickable, opening a compact modal with two independent upgrade tracks
+(Packing Capacity, Shipping Speed) — each showing Current/Next/Cost, an
+UPGRADE button that deducts cash and persists the new level immediately, or
+`MAX` once Level 5 is reached. No new bottom-nav tab; not the planned full
+Orchard/global UI redesign. A full-Packing harvest attempt shows a compact
+`PACKING FULL · 12/12` toast (`scenes/MainScene.ts`, reusing the existing
+`ToastQueue`), throttled to at most one per ~1.5s so a hold-and-sweep drag
+across several blocked apples — or a single HARVEST ALL click blocked on
+many slots — can't stack dozens of toasts.
+
+**Save migration**: `packingCapacityLevel`/`shippingSpeedLevel` default to
+1 on any save missing them (`systems/save.ts`). An old save whose
+`processingQueue` already exceeds Level 1's capacity of 12 is **never
+truncated** — it's left exactly as-is and simply drains naturally; the
+capacity gate only blocks *new* normal apples from entering while
+occupancy is at or above capacity, so an over-capacity legacy queue is
+self-resolving rather than a migration hazard.
+
+Verification: `scripts/verify-shipping-infrastructure.ts` — capacity
+gating (including the Specimen exemption), HARVEST ALL's
+Specimens-first/capacity-capped-normal-fruit behavior, both upgrade
+tracks' exact level/cost tables and MAX/insufficient-cash rejection,
+mid-day Shipping Speed purchase not rescaling an in-flight timer, the full
+Closing sequence (Specimens-first, single collection pass, highest-value
+priority, deterministic Field-order tie-break, overflow survival,
+carryover repricing), the Final Shipment cadence formula and its
+Closing-time clamp (both directions), and save migration (default levels,
+preserved/self-draining over-capacity legacy queue). Freshness value decay
+remains explicitly out of scope for this pass — Freshness still has no
+economic effect.
 
 ## Genetic Traits & Radar Chart
 
@@ -830,7 +949,12 @@ freshly discovered variety initializes.
 - Field 2: $300 (purchasable from Day 2). Field 3: $850. Field 4: $1800.
   Each requires the previous Field already owned.
 - Irrigation: $250 then $700, −12% fruit-slot regrow time per level, max 2.
-- Shipping: $400 then $1000, +10% sale value per level, max 2.
+- Shipping (sale-value bonus): $400 then $1000, +10% sale value per level,
+  max 2 — distinct from the Shipping *Speed* logistics upgrade below.
+- Packing Capacity (see "Shipping Infrastructure"): $150/$350/$700/$1200 for
+  Levels 2-5 (12/18/24/32/40 apples), max 5.
+- Shipping Speed (see "Shipping Infrastructure"): $200/$450/$900/$1600 for
+  Levels 2-5 (1.00/0.80/0.65/0.52/0.42 sec/apple), max 5.
 - No upgrade ever raises genetic Sweetness/Size/Yield directly — that's
   breeding's job only.
 
@@ -894,18 +1018,26 @@ early sacrifices whatever growth time remained, by design.
    `dayEnded`) gates the per-slot regrow loop in `Game.update()`, so growth
    freezes immediately; partially-grown fruit is left exactly as-is, never
    force-ripened.
-2. Collects every currently-*ripe* fruit slot across every unlocked/planted
-   Field through the same `harvestFruitSlot()` path normal harvesting uses
-   — no alternate pricing path — pushing them onto the existing single
-   farm-wide Processing Queue.
+2. Collects ripe fruit through a **capacity-aware** sequence — every ripe
+   Specimen first (Packing Capacity never applies to those), then ONE
+   highest-value-first normal-fruit collection pass limited to whatever
+   Packing capacity is currently free, all through the same
+   `harvestFruitSlot()` path normal harvesting uses (no alternate pricing
+   path). Any normal ripe apple that doesn't fit stays ripe on its exact
+   slot and survives into the next day rather than being force-collected —
+   see "Shipping Infrastructure" above for the exact sequence/priority/tie-
+   break rules; that pass is what replaced the old "collect everything
+   ripe, unconditionally" behavior described in earlier revisions of this
+   file.
 
 `Game.update()` then drains that same queue as always, but at an
-accelerated **Final Shipment** cadence while `closing` is true
-(`TUNING.FINAL_SHIPMENT_SECONDS_PER_APPLE`, default **0.12s/apple** vs the
-normal `PROCESSING_SECONDS_PER_APPLE` 1.0s/apple — roughly 8x faster, tuned
-so a typical remaining queue finishes in a couple of seconds) — still the
-one shared queue, never a second one, never a pricing change. Once the
-queue is fully empty, `update()` calls the private `finishClosing()`, which
+accelerated **Final Shipment** cadence while `closing` is true — derived
+from the currently-owned Shipping Speed level rather than a fixed constant
+(`max(0.08, normalCadence * 0.20)`; Level 1's normal 1.00s/apple cadence
+yields ≈0.20s/apple during Closing — see "Shipping Infrastructure" above
+for the full table) — still the one shared queue, never a second one,
+never a pricing change. Once the queue is fully empty, `update()` calls the
+private `finishClosing()`, which
 deducts Daily Operating Cost (see below), runs the day-log settlement math,
 and only then sets `dayEnded = true` (`closing` back to `false`) and emits
 a `'dayClosed'` event. This ordering — Closing begins → ripe fruit collected
@@ -1108,16 +1240,15 @@ probability nudge only, same spirit as the existing Day-3+ Orchard roll
 and Mutation Affinity, never a purchasable certainty. Exact price and
 multiplier are not decided yet; not implemented in this pass.
 
-### Shipping Infrastructure (future system — design only, not implemented)
+### Shipping Infrastructure V1 — IMPLEMENTED
 
-The current farm-wide Processing Queue (see Shipping Pipeline above) has
-effectively unlimited throughput once Closing's accelerated Final
-Shipment cadence kicks in, which trivially erases any bottleneck at day's
-end. A future pass is expected to introduce real finite shipping/packing
-capacity plus shipping-speed and capacity upgrades, so Closing can no
-longer simply flush an unbounded queue for free. Exact
-implementation/numbers are not decided yet; explicitly out of scope for
-this pass (no Shipping Box, no capacity/speed upgrades implemented here).
+Finite Packing Capacity, Shipping Speed, and the capacity-aware Closing
+collection sequence described above are now implemented — see "Shipping
+Infrastructure" earlier in this file for the full mechanics. Freshness
+value decay (harvested apples losing value the longer they wait in
+Packing) remains explicitly future work, unlocked by this pass but not
+part of it — see Shipping Pipeline's closing note and the Genetic Traits
+section's Freshness bullet.
 
 ### Market graph polish — IMPLEMENTED
 
@@ -1131,8 +1262,9 @@ movement line. See Market V1's "Graph clarity pass" subsection above and
 ### Revised priority order
 
 Shipping Pipeline, Day Cycle, Daily Operating Cost, Market V1 (incl. its
-graph clarity pass), and Orchard Mutation / Breeding Specimen are done (see
-their sections above) — remaining order:
+graph clarity pass), Orchard Mutation / Breeding Specimen, and Shipping
+Infrastructure V1 (Packing Capacity / Shipping Speed) are done (see their
+sections above) — remaining order:
 
 1. Orchard / global UI redesign
 2. Freshness integration

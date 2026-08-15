@@ -9,6 +9,7 @@ import { Button, text as mkText } from './uiKit.ts';
 import { ToastQueue } from './modals.ts';
 import { openVarietyPickerModal } from './varietyPicker.ts';
 import { catalogLabel } from '../render/appleAssets.ts';
+import { openShippingInfraModal } from './ShippingInfraModal.ts';
 
 // Ground y used by the (temporary) front-row trees, for positioning the
 // shipment box relative to them. Kept in sync with OrchardTreeLayer's own
@@ -37,6 +38,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   private harvestBtn: Button | null = null;
   private statLineText: Phaser.GameObjects.Text | null = null;
   private queueText: Phaser.GameObjects.Text | null = null;
+  private shippingSpeedText: Phaser.GameObjects.Text | null = null;
 
   constructor(scene: Phaser.Scene, game: Game, toasts: ToastQueue) {
     super(scene, 0, LAYOUT.contentTop);
@@ -192,25 +194,41 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
 
   private drawShipmentBox(): void {
     // Nudged down slightly from the old single-row layout so it clears the
-    // new back-row trees' canopy lobes. Still the temporary placeholder box
-    // (no redesign this pass) — just made to show a live, useful reading of
-    // the ONE shared farm-wide processing queue for playtesting, instead of
-    // a static "ship" label.
-    const boxX = LAYOUT.width - 180;
+    // new back-row trees' canopy lobes. Minimal Shipping Infrastructure UI
+    // (see PROJECT.md "Shipping Infrastructure" section 13) — no full
+    // Orchard/global redesign yet, just enough to read the Packing Box's
+    // live occupancy/capacity and Shipping cadence, and to reach the
+    // compact upgrade panel. Still the same box footprint area as the old
+    // placeholder, just taller for the second line and clickable.
+    const boxX = LAYOUT.width - 220;
     const boxY = TREE_TRUNK_Y + 4;
+    const boxW = 200;
+    const boxH = 84;
     const boxG = this.scene.add.graphics();
     boxG.fillStyle(0x8a5a2e, 1);
-    boxG.fillRect(boxX, boxY, 92, 60);
+    boxG.fillRoundedRect(boxX, boxY, boxW, boxH, 10);
     boxG.lineStyle(4, 0x5b3b1c, 1);
-    boxG.strokeRect(boxX, boxY, 92, 60);
+    boxG.strokeRoundedRect(boxX, boxY, boxW, boxH, 10);
     this.mainView.add(boxG);
-    this.queueText = mkText(this.scene, boxX + 46, boxY + 36, '', 20, THEME.textMid).setOrigin(0.5);
+
+    this.queueText = mkText(this.scene, boxX + boxW / 2, boxY + 24, '', 19, THEME.textLight, true).setOrigin(0.5);
     this.mainView.add(this.queueText);
+    this.shippingSpeedText = mkText(this.scene, boxX + boxW / 2, boxY + 48, '', 17, THEME.textLight).setOrigin(0.5);
+    this.mainView.add(this.shippingSpeedText);
+    this.mainView.add(mkText(this.scene, boxX + boxW / 2, boxY + boxH - 14, 'TAP TO UPGRADE', 13, '#e8d9b8').setOrigin(0.5));
+
+    const zone = this.scene.add.zone(boxX, boxY, boxW, boxH).setOrigin(0, 0);
+    zone.setInteractive({ useHandCursor: true });
+    zone.on('pointerdown', () => openShippingInfraModal(this.scene, this.game));
+    this.mainView.add(zone);
+
     this.refreshQueueText();
   }
 
   private refreshQueueText(): void {
-    this.queueText?.setText(`SHIP ${this.game.state.processingQueue.length}`);
+    const capacity = this.game.packingCapacity();
+    this.queueText?.setText(`PACKING ${this.game.state.processingQueue.length}/${capacity}`);
+    this.shippingSpeedText?.setText(`${this.game.shippingCadenceSeconds().toFixed(2)}s / apple`);
   }
 
   private buildInfoPanel(field: Field, variety: Variety): void {

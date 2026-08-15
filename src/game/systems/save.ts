@@ -121,6 +121,17 @@ function migrateState(state: GameState): void {
   if (!Array.isArray(state.processingQueue)) state.processingQueue = [];
   if (typeof state.processingTimer !== 'number') state.processingTimer = 0;
 
+  // Saves from before the Shipping Infrastructure pass have no
+  // packingCapacityLevel/shippingSpeedLevel at all — both default to Level
+  // 1 (see PROJECT.md "Shipping Infrastructure" section 17). Deliberately
+  // does NOT delete/truncate an existing over-capacity `processingQueue`
+  // (a save written before this pass could have more items queued than
+  // Level 1's capacity) — harvestFruitSlot's capacity gate only blocks NEW
+  // items from entering while occupancy >= capacity, so an over-capacity
+  // legacy queue simply drains naturally instead of losing history.
+  if (typeof state.packingCapacityLevel !== 'number') state.packingCapacityLevel = 1;
+  if (typeof state.shippingSpeedLevel !== 'number') state.shippingSpeedLevel = 1;
+
   // Saves from before the Day Cycle pass have no `closing` flag at all —
   // default to false (not mid-Closing). A save written WHILE `closing` was
   // already true resumes safely as-is: update() keeps draining the

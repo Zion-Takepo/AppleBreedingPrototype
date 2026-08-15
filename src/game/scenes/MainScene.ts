@@ -29,6 +29,12 @@ export class MainScene extends Phaser.Scene {
   private refreshAccum = 0;
   private speedMult = 1;
   private weekModalShown = false;
+  // Throttles the "PACKING FULL" toast (see PROJECT.md "Shipping
+  // Infrastructure" section 5) — a hold-and-sweep drag over several
+  // blocked ripe apples, or a single HARVEST ALL click blocked on many
+  // slots at once, can fire 'packingFull' many times in one gesture; this
+  // reuses one cooldown window instead of stacking dozens of toasts.
+  private lastPackingFullToastMs = -Infinity;
 
   constructor() {
     super('MainScene');
@@ -83,6 +89,14 @@ export class MainScene extends Phaser.Scene {
       }
       if (event.type === 'specimenAcquired') {
         this.toasts.show(`SPECIMEN ACQUIRED — ${catalogLabel(event.specimen.visualId)}`, THEME.gold);
+      }
+      if (event.type === 'packingFull') {
+        const now = this.time.now;
+        if (now - this.lastPackingFullToastMs >= 1500) {
+          this.lastPackingFullToastMs = now;
+          const capacity = this.logic.packingCapacity();
+          this.toasts.show(`PACKING FULL · ${this.logic.state.processingQueue.length}/${capacity}`, THEME.danger);
+        }
       }
       // Closing (automatic 18:00 or manual END DAY — see Game.beginClosing)
       // finishes asynchronously once the accelerated Final Shipment queue
