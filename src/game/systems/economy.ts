@@ -20,10 +20,12 @@ export function shippingMultiplier(shippingLevel: number): number {
   return 1 + shippingLevel * TUNING.SHIPPING_BONUS_PER_LEVEL;
 }
 
-export interface HarvestResult {
-  quantity: number;
-  revenue: number;
-  marketMultiplier: number;
+// value/baseValue are intentionally exact, UNROUNDED dollars — see
+// priceHarvestedApple's doc comment for why. Round only at display
+// boundaries (shipment popup, day-end/week summaries), never here.
+export interface PricedApple {
+  value: number;
+  baseValue: number;
 }
 
 /** Only Sweetness and Size affect an apple's price — Yield/Growth/Freshness never multiply revenue directly. */
@@ -32,21 +34,34 @@ export function baseAppleValue(sweetness: number, size: number): number {
 }
 
 /**
- * Temporary settlement batch: represents exactly TUNING.FRUIT_PER_BATCH
- * (15) apples, priced at baseAppleValue using *effective* (cultivation-
- * adjusted) Sweetness/Size, then existing market + shipping modifiers.
- * Yield does not multiply this — its production advantage already came
- * from having more active fruit slots produce more of these batches over
- * time (see activeSlotCount below).
+ * Prices exactly one apple at the moment it's harvested, using *effective*
+ * (cultivation-adjusted) Sweetness/Size plus the current market + shipping
+ * modifiers. The caller locks this result into the apple's ProcessingItem
+ * permanently — later changes to cultivation, variety, or market never
+ * retroactively reprice an apple already in the Shipping/Processing Queue.
+ *
+ * Deliberately returns exact, UNROUNDED dollar amounts. The old batch-of-15
+ * bridge rounded once, after summing 15 apples' worth of value, so its
+ * per-apple "granularity" was effectively ~1/15th of a dollar; rounding
+ * every individual apple here to the nearest whole dollar would throw that
+ * away — perApple typically only spans about $2-4, so whole-dollar
+ * quantization per apple can swing a batch's total by double-digit
+ * percentages in either direction and can make small Sweetness/Size
+ * improvements invisible (two different stat totals rounding to the same
+ * per-apple dollar). Callers accumulate these exact values (cash,
+ * totalRevenue, dayHarvestRevenue, dayMarketBonus) and round only where the
+ * number is actually displayed. `baseValue` is the pre-market-bonus portion
+ * (`perApple * shipMult`, i.e. `value` with marketMult backed out) so the
+ * existing day-log harvestRevenue/marketBonus split is preserved.
  */
-export function computeHarvest(variety: Variety, field: Field, state: GameState): HarvestResult {
+export function priceHarvestedApple(variety: Variety, field: Field, state: GameState): PricedApple {
   const { sweetness, size } = effectiveStats(variety, field.policy);
   const perApple = baseAppleValue(sweetness, size);
   const marketMult = marketMultiplierFor(variety, state.marketModifiers);
   const shipMult = shippingMultiplier(state.shippingLevel);
-  const quantity = TUNING.FRUIT_PER_BATCH;
-  const revenue = Math.round(quantity * perApple * marketMult * shipMult);
-  return { quantity, revenue, marketMultiplier: marketMult };
+  const baseValue = perApple * shipMult;
+  const value = baseValue * marketMult;
+  return { value, baseValue };
 }
 
 function irrigationReduction(irrigationLevel: number): number {

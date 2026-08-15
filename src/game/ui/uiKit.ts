@@ -204,3 +204,14 @@ export function text(
 export function clearContainer(c: Phaser.GameObjects.Container): void {
   c.removeAll(true);
 }
+
+/**
+ * Two-decimal currency formatting (no `$`/`+` sign) shared by every UI path
+ * that displays money. Money can now carry fractional cents internally (see
+ * systems/economy.ts priceHarvestedApple) — this is the single place that
+ * decides how that's presented, so display formatting doesn't get
+ * duplicated/drift ad hoc across call sites.
+ */
+export function formatMoney(amount: number): string {
+  return amount.toFixed(2);
+}

@@ -45,6 +45,14 @@ function migrateState(state: GameState): void {
   }
   if (!Array.isArray(state.recentParentIds)) state.recentParentIds = [];
 
+  // Saves from before the global Shipping Pipeline pass have no farm-wide
+  // processing queue at all (they used a since-removed per-field
+  // harvestedSinceReward counter instead) — start with an empty line rather
+  // than losing/crashing on load. Nothing meaningful can be reconstructed
+  // for any fruit that was mid-batch under the old bridge.
+  if (!Array.isArray(state.processingQueue)) state.processingQueue = [];
+  if (typeof state.processingTimer !== 'number') state.processingTimer = 0;
+
   // Root-cause fix for GREEN BASIC visually showing the red C1 apple: this
   // fallback used to blindly assign 'C1' to *any* Line missing a visualId
   // (from saves written before the visual-rarity pass existed at all),
@@ -92,7 +100,14 @@ function migrateState(state: GameState): void {
         }
       }
     }
-    if (typeof field.harvestedSinceReward !== 'number') field.harvestedSinceReward = 0;
+    // The old per-field batch-deferral rule (pendingPolicy waiting for a
+    // 15-fruit boundary) no longer exists — fold any stale pending value
+    // from an old save straight into `policy` rather than leaving it
+    // permanently stuck and never applied.
+    if (field.pendingPolicy) {
+      field.policy = field.pendingPolicy;
+      field.pendingPolicy = null;
+    }
   }
 }
 

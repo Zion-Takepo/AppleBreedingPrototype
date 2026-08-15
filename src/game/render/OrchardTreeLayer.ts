@@ -275,27 +275,23 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
   private lastIdentityKey = '';
   private currentField: Field | null = null;
   private game: Game;
-  private onBatchReward: (fieldId: number, revenue: number) => void;
   // True while the primary pointer is held down, tracked globally (scene
   // input, not any one fruit) so a press that starts on empty grass and
   // then drags onto fruit still harvests them.
   private sweepActive = false;
 
-  /**
-   * @param onBatchReward Called only when an individual fruit harvest also
-   * completes the temporary 15-fruit batch reward (revenue > 0) — the same
-   * moment the old always-one-cycle HARVEST button used to fire.
-   */
-  constructor(scene: Phaser.Scene, game: Game, onBatchReward: (fieldId: number, revenue: number) => void) {
+  constructor(scene: Phaser.Scene, game: Game) {
     super(scene, 0, 0);
     this.game = game;
-    this.onBatchReward = onBatchReward;
 
+    // Harvesting never awards cash directly — it only enqueues the apple
+    // onto the shared farm-wide processing queue (see Game.harvestFruitSlot
+    // / GameState.processingQueue). Shipment/cash feedback is driven
+    // separately, from Game's 'shipment' events (see OrchardScreen).
     const hooks: HarvestHooks = {
       onFruitConsumed: (slotIndex: number) => {
         if (!this.currentField) return;
-        const revenue = this.game.harvestFruitSlot(this.currentField.id, slotIndex);
-        if (revenue > 0) this.onBatchReward(this.currentField.id, revenue);
+        this.game.harvestFruitSlot(this.currentField.id, slotIndex);
       },
     };
 

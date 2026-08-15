@@ -11,12 +11,12 @@ import { breedOffspring } from './systems/breeding.ts';
 import {
   activeSlotIndices,
   allSlotsActive,
-  computeHarvest,
   dailyExpenses,
   fairCompositeScore,
   fruitRegrowSeconds,
   makeInitialFruitSlots,
   pickNextProductiveSlot,
+  priceHarvestedApple,
   sweetnessContestScore,
 } from './systems/economy.ts';
 import { computeMarketForDay } from './systems/market.ts';
@@ -32,7 +32,6 @@ function makeField(id: number, unlocked: boolean, varietyId: string | null, frac
     policy: 'NORMAL',
     pendingPolicy: null,
     slots: makeInitialFruitSlots(fractionGrown, variety?.growth ?? 50, 0, active),
-    harvestedSinceReward: 0,
   };
 }
 
@@ -56,6 +55,8 @@ function createInitialState(): GameState {
     discoveredColors: ['Red', 'Green'],
     discoveredPatterns: ['Plain'],
     discoveredVisualIds: ['C1', 'C2'],
+    processingQueue: [],
+    processingTimer: 0,
     breeding: {
       active: false,
       parentAId: null,
@@ -89,7 +90,7 @@ function createInitialState(): GameState {
 }
 
 export type GameEvent =
-  | { type: 'harvest'; fieldId: number; revenue: number }
+  | { type: 'shipment'; fieldId: number; revenue: number }
   | { type: 'breedingReady' }
   | { type: 'traitDiscovered' }
   | { type: 'changed' };
@@ -194,17 +195,61 @@ export class Game {
     // Each of the 15 fruit slots per field regrows on its own independent
     // timer now — there's no whole-field "growth cycle" to freeze, so
     // slots keep regrowing continuously regardless of which field tab is
-    // selected or whether the day is still active.
-    for (const field of this.state.fields) {
-      if (!field.unlocked || !field.varietyId) continue;
-      for (const slot of field.slots) {
-        if (!slot.active || slot.ripe) continue;
-        slot.timer -= dtSeconds;
-        if (slot.timer <= 0) {
-          slot.ripe = true;
-          changed = true;
+    // selected or whether the day is still active (dayActive=false, e.g.
+    // the timer simply ran out). Once the day is actually SETTLED
+    // (dayEnded — the player clicked END DAY and it resolved), growth
+    // freezes: already-ripe fruit stays ripe (skipped below regardless),
+    // and partially-grown fruit stops advancing and stays frozen at its
+    // current progress rather than silently ripening while the END DAY
+    // summary is on screen. This is deliberately narrower than the future
+    // Day Cycle/Final Shipment — it only stops new fruit from appearing.
+    if (!this.state.dayEnded) {
+      for (const field of this.state.fields) {
+        if (!field.unlocked || !field.varietyId) continue;
+        for (const slot of field.slots) {
+          if (!slot.active || slot.ripe) continue;
+          slot.timer -= dtSeconds;
+          if (slot.timer <= 0) {
+            slot.ripe = true;
+            changed = true;
+          }
         }
       }
+    }
+
+    // ONE shared farm-wide Shipping/Processing Queue: only the head item
+    // (index 0) has an active timer — the rest simply wait their turn, so
+    // buying more Fields raises production but never speeds up this shared
+    // line. A `while` (not `if`) lets a single large dt — e.g. the debug
+    // speed multiplier — ship several ready apples in one tick, each still
+    // emitting its own 'shipment' event exactly as if shipped individually.
+    if (this.state.processingQueue.length > 0) {
+      this.state.processingTimer -= dtSeconds;
+      while (this.state.processingTimer <= 0 && this.state.processingQueue.length > 0) {
+        const item = this.state.processingQueue.shift()!;
+        // Cash/totalRevenue are always paid — this money was genuinely
+        // earned the instant the apple was harvested/priced, regardless of
+        // day state. dayHarvestRevenue/dayMarketBonus, however, exist only
+        // to feed the CURRENT day's END DAY summary snapshot and get reset
+        // to 0 on the next advanceDayInternal(); once the day is already
+        // settled (dayEnded) that snapshot has already been taken and shown,
+        // so continuing to add to them here would just leak revenue that
+        // never appears in any summary. Guarding this (not the queue/cash
+        // itself) keeps the queue draining continuously exactly like fruit
+        // regrow already does, with no new Day Cycle/Final Shipment logic.
+        this.state.cash += item.value;
+        this.state.totalRevenue += item.value;
+        if (!this.state.dayEnded) {
+          this.state.dayHarvestRevenue += item.baseValue;
+          this.state.dayMarketBonus += item.value - item.baseValue;
+        }
+        // Exact, unrounded value — the HUD feedback now displays money to
+        // two decimal places, so no rounding belongs here (see HUD.ts).
+        this.emit({ type: 'shipment', fieldId: item.fieldId, revenue: item.value });
+        changed = true;
+        this.state.processingTimer += TUNING.PROCESSING_SECONDS_PER_APPLE;
+      }
+      if (this.state.processingQueue.length === 0) this.state.processingTimer = 0;
     }
 
     const breeding = this.state.breeding;
@@ -276,20 +321,20 @@ export class Game {
    * `pickNextProductiveSlot`) — the productive-slot *count* always stays
    * exactly at the Line's Yield-defined capacity, but *which* 15 physical
    * positions are currently productive keeps shifting over time, so no
-   * position is permanently dead just because Yield < 100. The field's
-   * actual cash reward is a temporary bridge: individually harvested fruit
-   * accumulate on `field.harvestedSinceReward`, and every
-   * `TUNING.FRUIT_PER_BATCH` (15) triggers the same single field-harvest
-   * transaction exactly once, matching the old one-cycle-one-reward rule.
-   * Returns the revenue granted this call (0 unless this was the 15th).
+   * position is permanently dead just because Yield < 100. Harvesting never
+   * awards cash directly: the apple is priced right now (locking in this
+   * field's current cultivation policy plus the current market/shipping
+   * multipliers — see `priceHarvestedApple`) and pushed onto the ONE shared
+   * farm-wide `state.processingQueue`; it ships (and actually pays out)
+   * later, from `update()`, once it reaches the front of that queue.
    */
-  harvestFruitSlot(fieldId: number, slotIndex: number): number {
+  harvestFruitSlot(fieldId: number, slotIndex: number): void {
     const field = this.getField(fieldId);
-    if (!field || !field.varietyId) return 0;
+    if (!field || !field.varietyId) return;
     const slot = field.slots[slotIndex];
-    if (!slot || !slot.active || !slot.ripe) return 0;
+    if (!slot || !slot.active || !slot.ripe) return;
     const variety = this.getVariety(field.varietyId);
-    if (!variety) return 0;
+    if (!variety) return;
 
     slot.ripe = false;
     slot.active = false;
@@ -301,30 +346,16 @@ export class Game {
     nextSlot.ripe = false;
     nextSlot.timer = fruitRegrowSeconds(variety.growth, this.state.irrigationLevel);
 
-    field.harvestedSinceReward += 1;
-
-    let revenue = 0;
-    if (field.harvestedSinceReward >= TUNING.FRUIT_PER_BATCH) {
-      field.harvestedSinceReward = 0;
-      const result = computeHarvest(variety, field, this.state);
-      const baseRevenue = Math.round(result.revenue / result.marketMultiplier);
-      const bonus = result.revenue - baseRevenue;
-
-      this.state.cash += result.revenue;
-      this.state.totalRevenue += result.revenue;
-      this.state.dayHarvestRevenue += baseRevenue;
-      this.state.dayMarketBonus += bonus;
-      if (field.pendingPolicy) {
-        field.policy = field.pendingPolicy;
-        field.pendingPolicy = null;
-      }
-
-      revenue = result.revenue;
-      this.emit({ type: 'harvest', fieldId, revenue });
+    const { value, baseValue } = priceHarvestedApple(variety, field, this.state);
+    this.state.processingQueue.push({ fieldId, value, baseValue });
+    // Only (re)arm the timer when the queue was empty — an apple arriving
+    // behind others already in line must not reset the head's remaining
+    // processing time.
+    if (this.state.processingQueue.length === 1) {
+      this.state.processingTimer = TUNING.PROCESSING_SECONDS_PER_APPLE;
     }
 
     this.notify();
-    return revenue;
   }
 
   plantVariety(fieldId: number, varietyId: string): void {
@@ -338,7 +369,6 @@ export class Game {
       this.state.irrigationLevel,
       variety ? activeSlotIndices(variety.id, variety.yieldStat) : allSlotsActive(),
     );
-    field.harvestedSinceReward = 0;
     if (field.pendingPolicy) {
       field.policy = field.pendingPolicy;
       field.pendingPolicy = null;
@@ -349,16 +379,12 @@ export class Game {
   setFieldPolicy(fieldId: number, policy: CultivationPolicy): void {
     const field = this.getField(fieldId);
     if (!field) return;
-    // Applies immediately only if nothing has been collected toward the
-    // current reward batch yet; otherwise it's queued for the next batch —
-    // same "takes effect next cycle" intent as before, translated to the
-    // new per-slot model.
-    if (field.harvestedSinceReward === 0) {
-      field.policy = policy;
-      field.pendingPolicy = null;
-    } else {
-      field.pendingPolicy = policy;
-    }
+    // Each apple now locks in its cultivation-adjusted price the instant
+    // it's harvested (see priceHarvestedApple), so there's no "batch"
+    // boundary left to defer a policy change across — it simply applies to
+    // whichever fruit is harvested next.
+    field.policy = policy;
+    field.pendingPolicy = null;
     this.notify();
   }
 
@@ -381,7 +407,6 @@ export class Game {
       this.state.irrigationLevel,
       newVariety ? activeSlotIndices(newVariety.id, newVariety.yieldStat) : allSlotsActive(),
     );
-    field.harvestedSinceReward = 0;
     field.policy = 'NORMAL';
     field.pendingPolicy = null;
     this.notify();
@@ -607,12 +632,23 @@ export class Game {
     if (!this.canEndDay()) return null;
     const expenses = dailyExpenses(this.unlockedFields().length);
     this.state.cash -= expenses;
-    const net = this.state.dayHarvestRevenue + this.state.dayMarketBonus + this.state.dayContestPrize - expenses;
+
+    // dayHarvestRevenue/dayMarketBonus accumulate exact, unrounded per-apple
+    // dollars all day (see priceHarvestedApple) — round only here, for the
+    // summary. Round the combined total once, then derive harvestRevenue by
+    // rounding just that component and marketBonus as the remainder, so the
+    // two displayed line items always sum to the rounded whole rather than
+    // each independently rounding away a few cents in the same direction
+    // (which could otherwise silently drift net by a dollar).
+    const combined = this.state.dayHarvestRevenue + this.state.dayMarketBonus;
+    const harvestRevenue = Math.round(this.state.dayHarvestRevenue);
+    const marketBonus = Math.round(combined) - harvestRevenue;
+    const net = harvestRevenue + marketBonus + this.state.dayContestPrize - expenses;
 
     const log: DayLogEntry = {
       day: this.state.day,
-      harvestRevenue: this.state.dayHarvestRevenue,
-      marketBonus: this.state.dayMarketBonus,
+      harvestRevenue,
+      marketBonus,
       contestPrize: this.state.dayContestPrize,
       expenses,
       net,

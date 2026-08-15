@@ -27,7 +27,9 @@ export function showWeekSummary(scene: Phaser.Scene, game: Game, onStartWeek2: (
     ['Contest Wins', `${contestWins}`],
     ['Highest Sweetness', `${state.highestSweetnessEver}`],
     ['Largest Apple (Size)', `${state.largestSizeEver}`],
-    ['Total Revenue', `$${state.totalRevenue}`],
+    // totalRevenue accumulates exact, unrounded per-apple dollars (see
+    // priceHarvestedApple) — round only for this display.
+    ['Total Revenue', `$${Math.round(state.totalRevenue)}`],
     ['Highest Generation', `${highestGen}`],
   ];
 

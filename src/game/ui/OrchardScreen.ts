@@ -35,6 +35,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   private cultivationBtns: { btn: Button; policy: CultivationPolicy }[] = [];
   private harvestBtn: Button | null = null;
   private statLineText: Phaser.GameObjects.Text | null = null;
+  private queueText: Phaser.GameObjects.Text | null = null;
 
   constructor(scene: Phaser.Scene, game: Game, toasts: ToastQueue) {
     super(scene, 0, LAYOUT.contentTop);
@@ -42,10 +43,12 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.toasts = toasts;
     // treeLayer is persistent (never torn down on render()) so fruit-reveal
     // and sway tweens can keep running smoothly between UI refreshes. Every
-    // individual fruit harvest goes straight to Game.harvestFruitSlot;
-    // handleBatchReward only fires the popup feedback on the (roughly
-    // 1-in-15) call that also completes the temporary batch reward.
-    this.treeLayer = new OrchardTreeLayer(scene, game, (fieldId, revenue) => this.handleBatchReward(fieldId, revenue));
+    // individual fruit harvest goes straight to Game.harvestFruitSlot,
+    // which only enqueues it — the actual cash/shipment feedback moment
+    // ('shipment' event, fired later from Game.update() once the apple
+    // reaches the front of the shared farm-wide processing queue) is shown
+    // next to the HUD cash total (see HUD.ts), not here.
+    this.treeLayer = new OrchardTreeLayer(scene, game);
     this.tabsRow = scene.add.container(0, 0);
     this.mainView = scene.add.container(0, 0);
     this.add([this.treeLayer, this.tabsRow, this.mainView]);
@@ -188,7 +191,10 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
 
   private drawShipmentBox(): void {
     // Nudged down slightly from the old single-row layout so it clears the
-    // new back-row trees' canopy lobes.
+    // new back-row trees' canopy lobes. Still the temporary placeholder box
+    // (no redesign this pass) — just made to show a live, useful reading of
+    // the ONE shared farm-wide processing queue for playtesting, instead of
+    // a static "ship" label.
     const boxX = LAYOUT.width - 180;
     const boxY = TREE_TRUNK_Y + 4;
     const boxG = this.scene.add.graphics();
@@ -197,7 +203,13 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     boxG.lineStyle(4, 0x5b3b1c, 1);
     boxG.strokeRect(boxX, boxY, 92, 60);
     this.mainView.add(boxG);
-    this.mainView.add(mkText(this.scene, boxX + 46, boxY + 36, 'ship', 20, THEME.textMid).setOrigin(0.5));
+    this.queueText = mkText(this.scene, boxX + 46, boxY + 36, '', 20, THEME.textMid).setOrigin(0.5);
+    this.mainView.add(this.queueText);
+    this.refreshQueueText();
+  }
+
+  private refreshQueueText(): void {
+    this.queueText?.setText(`SHIP ${this.game.state.processingQueue.length}`);
   }
 
   private buildInfoPanel(field: Field, variety: Variety): void {
@@ -285,32 +297,8 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     const anyRipe = field.slots.some((s) => s.ripe);
     this.harvestBtn?.setColor(anyRipe ? THEME.gold : 0x9c9484);
     this.harvestBtn?.setEnabled(anyRipe);
-  }
 
-  // Fires only when an individual fruit harvest also completed the
-  // temporary 15-fruit batch reward — Game already applied the cash, this
-  // is purely the light, local "+$revenue" feedback. No camera/screen
-  // shake — harvesting should feel light, not jarring.
-  private handleBatchReward(_fieldId: number, revenue: number): void {
-    const popup = mkText(this.scene, LAYOUT.width / 2, 280, `+$${revenue}`, 52, '#2f5a20', true, true).setOrigin(0.5);
-    popup.setScale(0.6);
-    popup.setAlpha(0);
-    this.treeLayer.add(popup);
-    this.scene.tweens.add({
-      targets: popup,
-      alpha: 1,
-      scale: 1,
-      y: 200,
-      duration: 350,
-      ease: 'Back.Out',
-      onComplete: () => {
-        this.scene.time.delayedCall(700, () => {
-          this.scene.tweens.add({ targets: popup, alpha: 0, duration: 300, onComplete: () => popup.destroy() });
-        });
-      },
-    });
-
-    this.scene.time.delayedCall(120, () => this.render());
+    this.refreshQueueText();
   }
 
   private openVarietyPicker(fieldId: number): void {

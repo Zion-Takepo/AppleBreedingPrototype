@@ -62,10 +62,24 @@ export interface Field {
   // 15 independent per-fruit regrowth states (one per Orchard fruit slot),
   // replacing the old single whole-field growth cycle.
   slots: FieldFruitSlot[];
-  // Temporary economy bridge: individually-harvested fruit accumulate here;
-  // every TUNING.FRUIT_PER_BATCH triggers the existing single field-harvest
-  // reward once. Intentionally not surfaced prominently in the UI.
-  harvestedSinceReward: number;
+}
+
+// One harvested apple sitting in the farm-wide Shipping/Processing Queue
+// (GameState.processingQueue below). `value`/`baseValue` are priced and
+// locked in at harvest time (see Game.harvestFruitSlot) — later changes to
+// cultivation, variety, or market never retroactively reprice an
+// already-harvested apple. Both are exact, UNROUNDED dollar amounts (see
+// systems/economy.ts priceHarvestedApple) — rounding every individual apple
+// to a whole dollar would swamp small Sweetness/Size differences, so
+// rounding only happens at display time (shipment popup, day/week
+// summaries). `baseValue` (pre-market-bonus) is kept alongside `value`
+// (final, post-market-bonus) purely so the existing day-log
+// harvestRevenue/marketBonus split can still be reconstructed when this
+// item ships.
+export interface ProcessingItem {
+  fieldId: number;
+  value: number;
+  baseValue: number;
 }
 
 export interface OffspringCandidate extends Variety {
@@ -123,6 +137,12 @@ export interface GameState {
   discoveredColors: AppleColor[];
   discoveredPatterns: ApplePattern[];
   discoveredVisualIds: AppleAssetId[];
+  // ONE shared farm-wide Shipping/Processing Queue — every Field's harvest
+  // feeds this same FIFO (buying more Fields raises production, never the
+  // shared line's throughput). `processingTimer` is the seconds remaining
+  // on the head item (index 0); other items simply wait their turn.
+  processingQueue: ProcessingItem[];
+  processingTimer: number;
   breeding: BreedingState;
   irrigationLevel: number;
   shippingLevel: number;

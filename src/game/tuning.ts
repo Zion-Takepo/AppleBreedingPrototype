@@ -20,13 +20,20 @@ export const TUNING = {
   // activeSlotCount). Yield 0 -> 9/15 active, 100 -> 15/15.
   YIELD_BASE_ACTIVE_SLOTS: 9,
   YIELD_ACTIVE_SLOTS_RANGE: 6,
-  // Temporary economy bridge until a real Shipping system replaces it:
-  // every this-many individually-harvested fruit from a field triggers the
-  // existing single field-harvest reward once. Matches the 15 physical
-  // fruit slots (5 trees x 3 slots) in OrchardTreeLayer.
+  // Count of physical fruit slots per field (5 trees x 3 slots in
+  // OrchardTreeLayer) — Yield's active-slot math is expressed as a
+  // fraction of this. No longer tied to any cash-batching rule (see
+  // PROCESSING_SECONDS_PER_APPLE / GameState.processingQueue below).
   FRUIT_PER_BATCH: 15,
   STARTING_FIELD_GROWTH: 0.6,
   NEW_FIELD_GROWTH: 0.5,
+
+  // Shipping Pipeline: ONE global farm-wide processing queue (GameState.
+  // processingQueue), not one per Field — buying more Fields increases
+  // production but never speeds up the shared shipping line. Seconds the
+  // queue's head item spends processing before it ships and pays out.
+  // Tunable here for easy human playtesting.
+  PROCESSING_SECONDS_PER_APPLE: 1.0,
 
   STARTING_CASH: 50,
 

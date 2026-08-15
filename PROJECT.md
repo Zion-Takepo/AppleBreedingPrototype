@@ -58,17 +58,12 @@ discovery).
   its own timer completes, independent of every other slot.
 - Apples are directly harvestable: click one, or press-and-hold anywhere and
   drag over ripe fruit to sweep-harvest. Each individual harvest gives
-  lightweight pop feedback immediately (no waiting). **Temporary economy
-  bridge** (until a real Shipping system replaces it): individually
-  harvested fruit accumulate on `field.harvestedSinceReward`; every 15
-  (`TUNING.FRUIT_PER_BATCH`, matching the 15 physical slots) triggers the
-  existing single field-harvest cash reward exactly once, then the counter
-  resets — never multiplied per fruit, and not gated on all 15 being ripe
-  at once. This counter isn't surfaced prominently in the UI.
+  lightweight pop feedback immediately (no waiting). Harvesting itself
+  **never awards cash directly** — see Shipping Pipeline below.
 - **HARVEST ALL** is a small secondary button (~200×56px, gold when
   anything is ripe) that collects whatever fruit are *currently* ripe —
-  zero, some, or all 15 — contributing normally toward the same batch
-  counter above. It never requires the full crop to be ripe first.
+  zero, some, or all 15 — feeding the exact same Shipping Pipeline as
+  individual harvest. It never requires the full crop to be ripe first.
 - Switching Field tabs preserves each field's independent per-slot state
   exactly (ripe/growing, remaining timer, current visibility) — the shared
   set of 15 tree visuals just snaps to match whichever field is now
@@ -77,10 +72,56 @@ discovery).
   cultivation size bonus); which of the 10 illustrations is shown is the
   variety's `visualId` (see Visual Rarity below). Tree count/position/motion
   is presentation-only.
-- Cultivation policy (NORMAL / SWEETEN / GROW_BIG) changes apply immediately
-  if nothing has been collected yet toward the field's current reward batch;
-  otherwise they're queued and take effect starting with the **next**
-  batch's harvest.
+- Cultivation policy (NORMAL / SWEETEN / GROW_BIG) changes apply
+  immediately — since each apple's price is now locked in individually at
+  the moment it's harvested (see Shipping Pipeline below), a policy change
+  simply applies to whichever fruit is harvested next; there is no batch
+  boundary left to defer it across.
+
+## Shipping Pipeline
+
+Harvesting (individual click/sweep or HARVEST ALL — both feed the identical
+path) never awards cash directly. Instead each harvested apple is priced
+immediately — locking in that field's *current* cultivation policy plus the
+*current* market/shipping multipliers into the apple's own record, so later
+changes to cultivation, variety, or market never retroactively reprice an
+apple already in the pipeline — and pushed onto **one shared, farm-wide**
+processing queue (`GameState.processingQueue`, an array of
+`{ fieldId, value, baseValue }`; NOT one queue per Field — buying another
+Field raises production but never speeds up the shared shipping line, which
+preserves it as a deliberate future bottleneck for Freshness/processing
+upgrades). Only the queue's head item has an active timer
+(`GameState.processingTimer`); ticked every frame in `Game.update()`
+regardless of day state, matching the Orchard's own continuous-regrow
+policy. `value`/`baseValue` are exact, **unrounded** dollar amounts —
+rounding every individual apple to a whole dollar would swamp small
+Sweetness/Size differences (a $2-4 per-apple range quantized to $1 steps),
+so the queue, `cash`, and `totalRevenue` all carry full fractional
+precision; both `cash` (HUD) and every shipment's own feedback display it
+rounded to exactly two decimal places (`$50.00`, `+$2.75`) rather than a
+whole dollar. Every `TUNING.PROCESSING_SECONDS_PER_APPLE` (1.0s) seconds,
+the head ships automatically: its value pays into `cash`/`totalRevenue`
+unconditionally (that money was genuinely earned at harvest time), while
+`baseValue` only adds into `dayHarvestRevenue`/`dayMarketBonus` while
+`!GameState.dayEnded` — once END DAY has settled the current day's summary
+snapshot, further shipments still pay cash but stop feeding those two
+day-scoped counters, so leftover queue items draining after settlement
+can't silently inflate or attribute revenue to a day whose summary was
+already shown (the queue itself keeps draining unconditionally either way —
+this settlement guard is the only day-state-aware behavior in the Shipping
+Pipeline). A `'shipment'` event fires with the originating fieldId
+regardless of day state, and the next item begins processing. The HUD
+(`ui/HUD.ts`) listens for every `'shipment'` event — always, since the HUD
+itself is always visible regardless of which bottom-nav screen is active,
+and never filtered to a selected Field since the queue is shared farm-wide
+— to show a compact "+$" feedback directly under the cash total (a single
+reused Text that drifts lightly upward and fades, never a stacked list),
+paired with a small scale pulse on the cash total itself. HUD cash also
+updates through its normal periodic refresh, so cash visibly rises in small
+increments as apples ship rather than jumping in a lump sum. The temporary
+shipment-box placeholder (bottom-right of the Orchard view, not yet
+redesigned) shows a live farm-wide queue count for playtesting. Freshness-
+based queue-time depreciation is intentionally not part of this pass.
 
 ## Genetic Traits & Radar Chart
 
@@ -291,27 +332,28 @@ rarity themselves — they always show the planted variety's own `visualId`.
 
 ## Economy
 
-Each temporary settlement batch (see Orchard above) represents exactly
-`TUNING.FRUIT_PER_BATCH` (15) apples — quantity is fixed, not
-Yield-derived, since Yield's production advantage is active-slot count
-instead (more batches produced over time, not a bigger one):
+Each apple is priced individually, at the moment it's harvested (see
+Shipping Pipeline above), using effective (cultivation-adjusted)
+Sweetness/Size plus the current market/shipping multipliers:
 
 ```
 value per apple  = 2.00 + EffectiveSweetness * 0.010 + EffectiveSize * 0.005
-revenue          = 15 * value per apple * marketMultiplier * shippingMultiplier
+sale value       = value per apple * marketMultiplier * shippingMultiplier
 marketMultiplier = clamp(1 + colorModifier + patternModifier, ..., 1.6)
 ```
 
 Only Sweetness and Size affect price. Rarity (Common/Rare/Epic) is a
 separate visual/discovery concept and never multiplies price directly — a
-strong Common can outsell a weak Epic.
+strong Common can outsell a weak Epic. Yield's production advantage is
+active-slot count instead (more apples produced over time, not a
+higher-value one).
 
 Daily expenses at END DAY: `$15 + $20 per owned Field`.
 
 Cultivation modifiers (SWEETEN/GROW_BIG) only affect *effective*
 Sweetness/Size used for harvest value and contest scoring — genetic stats
 used for breeding are never touched, and cultivation never affects Yield's
-active-slot count or harvest quantity (quantity is fixed at 15 per batch).
+active-slot count or harvest quantity.
 
 ## Farmland & Upgrades
 
@@ -388,12 +430,96 @@ apple; a bred Line never has this id (bred Lines get a fresh
 - Since the Orchard pass replaced the single whole-field growth cycle with
   15 independent per-slot regrowth timers, the old day-end growth freeze (a
   field at 0% growth wouldn't start a new cycle after the day ended) no
-  longer has a clean per-field equivalent and was dropped: fruit slots now
-  regrow continuously regardless of day state. This matches the pass's
-  explicit goal of a continuously living orchard; day-length/clock rules
-  themselves are unchanged and out of scope for that pass.
+  longer has a clean per-field equivalent — fruit slots regrow continuously
+  through `dayActive` going false (the day timer simply running out), which
+  matches that pass's explicit goal of a continuously living orchard.
+  The Shipping Pipeline pass later added back a narrower freeze: once
+  `GameState.dayEnded` is true (the player actually clicked END DAY and it
+  resolved), slot timers stop advancing entirely — already-ripe fruit stays
+  ripe, partially-grown fruit stays frozen at its exact progress, and no new
+  fruit can ripen — so a settled day visibly stops producing new fruit
+  while the END DAY summary is on screen. The Shipping/Processing Queue
+  itself is NOT covered by this freeze and keeps draining (see Shipping
+  Pipeline above). Day-length/clock rules themselves are otherwise
+  unchanged and still out of scope (no 09:00-18:00 Day Cycle or Final
+  Shipment yet).
 
 Offspring resolution is intentionally forced: the player must KEEP exactly
 one of the four candidates (no discard/reroll option). This is a core
 playtest hypothesis, not a soft-lock — a candidate can always be kept and
 breeding continues normally afterward.
+
+## Planned direction (decided, not yet implemented)
+
+Decisions made after the current playable baseline commit `666052d`. None of
+this is built yet — recorded here so intent survives until each piece is
+actually implemented. Update each subsection into the relevant section above
+(and remove it from here) once it ships.
+
+### Orchard / global UI redesign
+
+Direction: warm painterly orchard look — cream rounded cards, dark green top
+HUD, gold accents, painterly orchard background. Orchard stays the visual
+hero (5 trees: 3 front / 2 back, unchanged from today). Planned layout:
+
+- Lower-left card: stats readout — Sweetness / Size / Yield / Growth /
+  Freshness.
+- Bottom navigation stays icon-based but becomes much more compact than
+  today's full-width bar.
+- Lower-right white card combines CHANGE VARIETY + shipping/basket status +
+  processing status + HARVEST ALL into one card.
+- Current RED BASIC / +FIELD tab presentation will be cleaned up later as
+  part of this redesign, not before.
+- Approved top-HUD ordering: **DAY / TIME → MARKET → NEXT CONTEST → MONEY →
+  END DAY**. "Day ended" should eventually be represented within the DAY /
+  TIME area itself, not as a separate full HUD item. The shipment `+$X.XX`
+  feedback (see Shipping Pipeline above) is anchored directly below MONEY.
+  This is a future HUD/layout direction only — not implemented as part of
+  this redesign entry yet.
+
+Not implemented yet; do not build ahead of the priority order below. The
+shipping/basket status + processing status portion of the lower-right card
+already has a real implementation to surface (see Shipping Pipeline above)
+once this redesign happens — it isn't placeholder-only anymore.
+
+### Day Cycle
+
+Target day window: roughly 09:00–18:00, shown as a compact digital clock
+(replaces today's plain countdown timer). At 18:00: collect remaining mature
+fruit, finish whatever's left in the processing queue, perform a Final
+Shipment, settle the day, then transition to the next day. Manual END DAY
+runs that same closing procedure early, not a different one.
+
+### Daily Operating Cost
+
+Replaces today's flat `$15 + $20/field` daily expense (see Economy above)
+with a single, simple **Operating Cost** value: deducted once per day, rises
+gradually with progression, and increases as the operation expands (more
+Fields → higher cost). Keep V1 to this one number — do not split it into
+multiple expense categories.
+
+### Market V1
+
+Every DISCOVERED Visual Variety (not individual Lines — see Visual Rarity
+above) gets one market-price update per game day; price is per Visual
+Variety, never per individual owned Line. The Market screen presents
+discovered varieties like a weather-report overview: image / catalog
+identity / today's +/- change / trend, keeping roughly 5 days of compact
+price history. RISING / STABLE / FALLING trends have real predictive
+influence on the next daily move, but never guarantee it; prices have
+long-term pull back toward baseline, and Calendar events (see Calendar
+above) can create larger temporary moves. UNDISCOVERED varieties remain
+hidden/unknown.
+
+### Revised priority order
+
+Shipping Pipeline is done (see Shipping Pipeline above) — remaining order:
+
+1. Day Cycle
+2. Daily Operating Cost
+3. Orchard / global UI redesign
+4. Market V1
+5. Freshness integration
+6. Collection / Library / Replant cleanup
+7. Orchard mutation-fruit discoveries
+8. Final art / animation / sound / font polish
