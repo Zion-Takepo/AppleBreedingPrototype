@@ -1,14 +1,23 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
-import type { OffspringCandidate, Variety } from '../types.ts';
+import type { BreedParentRef, OffspringCandidate, Variety } from '../types.ts';
 import { AppleVisual } from '../render/AppleVisual.ts';
 import { APPLE_RARITY, catalogLabel } from '../render/appleAssets.ts';
 import { LAYOUT, THEME } from './theme.ts';
 import { Button, ProgressBar, panel, text as mkText } from './uiKit.ts';
 import { RadarChart } from './RadarChart.ts';
 import { LineCard } from './LineCard.ts';
+import { SpecimenCard } from './SpecimenCard.ts';
 import { openLibraryPicker } from './LibraryPicker.ts';
 import { ToastQueue } from './modals.ts';
+import { createStatInfoButton } from './StatHelpModal.ts';
+
+// Shared top-right placement for the "i" stat-info button on both Breed
+// screens (parent selection and offspring result) — see PROJECT.md
+// "Five-stat info button". Kept just below the TIME PAUSED indicator's own
+// corner so neither overlaps.
+const INFO_BUTTON_X = LAYOUT.width - 50;
+const INFO_BUTTON_Y = 60;
 
 // Large Parent A/B card height — tall enough for apple + name/visual-
 // variety/Gen text + a small radar without overlap (see LineCard's
@@ -58,8 +67,8 @@ export class BreedScreen extends Phaser.GameObjects.Container {
   private game: Game;
   private toasts: ToastQueue;
   private content: Phaser.GameObjects.Container;
-  private selectedA: string | null = null;
-  private selectedB: string | null = null;
+  private selectedA: BreedParentRef | null = null;
+  private selectedB: BreedParentRef | null = null;
   // Which of the 4 candidates is currently previewed on the result screen —
   // clicking a card only ever sets this; only the KEEP button commits.
   private selectedSlot: Slot | null = null;
@@ -111,29 +120,74 @@ export class BreedScreen extends Phaser.GameObjects.Container {
     } else {
       this.renderSelectParents();
     }
+
+    this.renderTimePausedIndicator();
+  }
+
+  /**
+   * Subtle, secondary reminder that the simulation is frozen while Breed is
+   * the active screen (see PROJECT.md "Breed is a strategic pause" — the
+   * actual pause gate lives in MainScene.update(), not here; this is just
+   * the player-facing indicator). Omitted during the rare edge case where
+   * Closing is already in progress or the day has already ended, since the
+   * simulation genuinely isn't paused then (see MainScene.isBreedPauseActive).
+   */
+  private renderTimePausedIndicator(): void {
+    if (this.game.state.closing || this.game.state.dayEnded) return;
+    this.content.add(mkText(this.scene, LAYOUT.width - 16, 8, 'TIME PAUSED', 16, THEME.textMid, false, true).setOrigin(1, 0));
+  }
+
+  private renderStatInfoButton(): void {
+    const btn = createStatInfoButton(this.scene, INFO_BUTTON_X, INFO_BUTTON_Y);
+    this.content.add(btn);
+  }
+
+  /**
+   * "TOTAL 267 -> 272 (+5)" (see PROJECT.md section 3) — the comparison
+   * baseline is always the STRONGER parent's TOTAL (the guaranteed
+   * progression rule), and the target is the single shared TOTAL every one
+   * of the four candidates was rescaled to, so this is identical no matter
+   * which candidate card it's drawn on. Null only for a pre-this-pass
+   * reloaded result (old save, no persisted TOTAL data) — omitted rather
+   * than showing a bogus number.
+   */
+  private formatTotalLine(): string | null {
+    const { strongerParentTotal, breedTargetTotal } = this.game.state.breeding;
+    if (strongerParentTotal === null || breedTargetTotal === null) return null;
+    const delta = breedTargetTotal - strongerParentTotal;
+    const deltaText = delta >= 0 ? `+${delta}` : `${delta}`;
+    return `TOTAL ${strongerParentTotal} → ${breedTargetTotal} (${deltaText})`;
   }
 
   private renderSelectParents(): void {
     this.content.add(mkText(this.scene, 24, 12, 'BREED — choose two parents', 30, THEME.textDark, true));
+    this.renderStatInfoButton();
 
-    this.drawParentCard(100, 70, 'A', this.selectedA, (id) => {
-      this.selectedA = id;
+    this.drawParentCard(100, 70, 'A', this.selectedA, (ref) => {
+      this.selectedA = ref;
       this.render();
     });
-    this.drawParentCard(900, 70, 'B', this.selectedB, (id) => {
-      this.selectedB = id;
+    this.drawParentCard(900, 70, 'B', this.selectedB, (ref) => {
+      this.selectedB = ref;
       this.render();
     });
 
     // Swap control — matters because offspring A is Parent-A-biased and
-    // offspring B is Parent-B-biased, so which side a Line sits on changes
-    // the outcome distribution, not just cosmetically.
+    // offspring B is Parent-B-biased, so which side a parent sits on
+    // changes the outcome distribution, not just cosmetically.
     const swapBtn = new Button(this.scene, LAYOUT.width / 2, 70 + 34 + PARENT_CARD_H / 2, 76, 76, '⇄', () => this.swapParents(), THEME.info, 32);
     this.content.add(swapBtn);
 
+    // The same Specimen id can't occupy both slots — the picker already
+    // excludes it from the OTHER slot's list, but this is the
+    // defense-in-depth "clearly disable BREED" half of that rule (see
+    // PROJECT.md section 9).
+    const sameSpecimenConflict =
+      !!this.selectedA && !!this.selectedB && this.selectedA.kind === 'SPECIMEN' && this.selectedB.kind === 'SPECIMEN' && this.selectedA.id === this.selectedB.id;
+
     const cost = this.game.breedingCost();
     const duration = this.game.breedingDuration();
-    const canStart = this.game.canStartBreeding() && !!this.selectedA && !!this.selectedB && this.game.state.cash >= cost;
+    const canStart = this.game.canStartBreeding() && !!this.selectedA && !!this.selectedB && !sameSpecimenConflict && this.game.state.cash >= cost;
 
     const breedBtnY = 70 + 34 + PARENT_CARD_H + 50;
     const costLabel = cost === 0 ? 'FREE' : `$${cost}`;
@@ -178,31 +232,51 @@ export class BreedScreen extends Phaser.GameObjects.Container {
     this.render();
   }
 
-  // Large Parent A/B card. Per spec, shows only apple/customName/visual-
-  // variety label/rarity/Gen/mini RadarChart — never the exact five stat
-  // numbers here (that's what the Library Picker's detail panel is for).
-  // Clicking anywhere on the card (filled or empty) opens the Library
-  // Picker in the matching "SELECT PARENT A/B" mode; only that picker's
-  // explicit CTA actually commits a selection.
-  private drawParentCard(x: number, y: number, label: 'A' | 'B', varietyId: string | null, onPick: (id: string) => void): void {
+  private parentDisplayName(ref: BreedParentRef | null): string | undefined {
+    if (!ref) return undefined;
+    if (ref.kind === 'LINE') return this.game.getVariety(ref.id)?.customName;
+    const specimen = this.game.state.specimens.find((s) => s.id === ref.id);
+    return specimen ? `${catalogLabel(specimen.visualId)} SPECIMEN` : undefined;
+  }
+
+  // Large Parent A/B card. Per spec, shows only apple/name-or-catalog-
+  // label/rarity/Gen (Lines) or catalog label/Found Day (Specimens)/mini
+  // RadarChart — never the exact five stat numbers here (that's what the
+  // Library Picker's detail panel is for). Clicking anywhere on the card
+  // (filled or empty) opens the Library Picker in the matching "SELECT
+  // PARENT A/B" mode, defaulted to whichever source the current selection
+  // is from; only that picker's explicit CTA actually commits a selection.
+  private drawParentCard(x: number, y: number, label: 'A' | 'B', ref: BreedParentRef | null, onPick: (ref: BreedParentRef) => void): void {
     const w = 560;
     const h = PARENT_CARD_H;
     this.content.add(mkText(this.scene, x, y, `Parent ${label}`, 22, THEME.textMid, true));
 
     const openPicker = () => {
-      const otherId = label === 'A' ? this.selectedB : this.selectedA;
-      const other = this.game.getVariety(otherId);
+      const otherRef = label === 'A' ? this.selectedB : this.selectedA;
+      const otherName = this.parentDisplayName(otherRef);
       openLibraryPicker(this.scene, this.game, {
         title: `SELECT PARENT ${label}`,
         ctaLabel: `SELECT AS PARENT ${label}`,
-        pairingWithLabel: other ? `PAIRING WITH: ${other.customName}` : undefined,
-        onSelect: (line) => onPick(line.id),
+        pairingWithLabel: otherName ? `PAIRING WITH: ${otherName}` : undefined,
+        excludeSpecimenId: otherRef?.kind === 'SPECIMEN' ? otherRef.id : null,
+        initialSourceMode: ref?.kind === 'SPECIMEN' ? 'SPECIMENS' : 'LINES',
+        onSelect: (pickedRef) => onPick(pickedRef),
       });
     };
 
-    const variety = this.game.getVariety(varietyId);
+    const variety = ref?.kind === 'LINE' ? this.game.getVariety(ref.id) : undefined;
+    const specimen = ref?.kind === 'SPECIMEN' ? this.game.state.specimens.find((s) => s.id === ref.id) : undefined;
+
     if (variety) {
       const card = new LineCard(this.scene, x, y + 34, w, h, variety, {
+        appleSizePx: 150,
+        radarRadius: 68,
+        radarLabels: false,
+        onClick: openPicker,
+      });
+      this.content.add(card);
+    } else if (specimen) {
+      const card = new SpecimenCard(this.scene, x, y + 34, w, h, specimen, {
         appleSizePx: 150,
         radarRadius: 68,
         radarLabels: false,
@@ -213,7 +287,7 @@ export class BreedScreen extends Phaser.GameObjects.Container {
       const bg = panel(this.scene, x, y + 34, w, h, THEME.panelBg2, THEME.panelBorder, 14);
       this.content.add(bg);
       this.content.add(mkText(this.scene, x + w / 2, y + 34 + h / 2 - 16, 'No parent selected', 24, THEME.textMid).setOrigin(0.5));
-      this.content.add(mkText(this.scene, x + w / 2, y + 34 + h / 2 + 18, 'Click to choose from your Library', 18, THEME.textMid).setOrigin(0.5));
+      this.content.add(mkText(this.scene, x + w / 2, y + 34 + h / 2 + 18, 'Click to choose a Line or Specimen', 18, THEME.textMid).setOrigin(0.5));
       const zone = this.scene.add.zone(x, y + 34, w, h).setOrigin(0, 0);
       zone.setInteractive();
       zone.on('pointerdown', openPicker);
@@ -253,7 +327,15 @@ export class BreedScreen extends Phaser.GameObjects.Container {
     this.content.add(mkText(this.scene, LAYOUT.width / 2, 252, `${remaining}s remaining`, 24, THEME.textMid, false, true).setOrigin(0.5, 0));
 
     this.content.add(
-      mkText(this.scene, LAYOUT.width / 2, 340, 'Go check the Orchard, Calendar, or Collection\nwhile this brews — you don\'t need to wait here.', 24, THEME.textMid, false)
+      mkText(
+        this.scene,
+        LAYOUT.width / 2,
+        340,
+        "Farm time is paused while you're on this tab, but breeding still\nbrews normally — feel free to wait here, or check the Orchard,\nCalendar, or Collection instead.",
+        24,
+        THEME.textMid,
+        false,
+      )
         .setOrigin(0.5, 0)
         .setAlign('center'),
     );
@@ -271,12 +353,18 @@ export class BreedScreen extends Phaser.GameObjects.Container {
     this.content.add(
       mkText(this.scene, LAYOUT.width / 2, 10, 'BREEDING RESULT — select a candidate to inspect', 26, THEME.textDark, true).setOrigin(0.5, 0),
     );
+    this.renderStatInfoButton();
 
     const cardW = 360;
-    const cardH = 480;
+    // A few px taller than the original 480 to fit the new TOTAL
+    // progression line (see PROJECT.md section 3) without cramping the
+    // existing Gen/radar layout.
+    const cardH = 496;
     const gap = 20;
     const startX = (LAYOUT.width - (cardW * 4 + gap * 3)) / 2;
-    const startY = 56;
+    // Nudged down from the original 56 for a bit more breathing room under
+    // the title/info-button row above (see the Breed-result layout tweak).
+    const startY = 76;
 
     // Discovery already happened at breed-resolve time (Game.resolveBreeding
     // adds newly-seen visualIds to discoveredVisualIds right away, before
@@ -322,7 +410,19 @@ export class BreedScreen extends Phaser.GameObjects.Container {
     ty += appleSize + 14;
 
     this.content.add(mkText(this.scene, x + w / 2, ty, `Gen ${child.generation}`, 17, THEME.textMid, false, true).setOrigin(0.5, 0));
-    ty += 33 + 34; // + label-margin gap before the radar (matches LineCard's labeled-radar convention)
+    ty += 26;
+
+    // TOTAL progression (see PROJECT.md section 2/3) — every Breed
+    // operation rescales all four candidates to the SAME shared target
+    // TOTAL, so this line is identical across all four cards; kept
+    // visually secondary (small, muted) to the candidate's main stats/
+    // Visual above and below it.
+    const totalLine = this.formatTotalLine();
+    if (totalLine) {
+      this.content.add(mkText(this.scene, x + w / 2, ty, totalLine, 15, THEME.textMid, false, true).setOrigin(0.5, 0));
+      ty += 24;
+    }
+    ty += 22; // gap before the radar (matches LineCard's labeled-radar convention)
 
     const radarRadius = 76;
     const radar = new RadarChart(this.scene, x + w / 2, ty + radarRadius, radarRadius, true);

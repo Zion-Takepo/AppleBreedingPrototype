@@ -1,8 +1,8 @@
 import { COLORS, PATTERNS, TUNING, type AppleColor, type ApplePattern } from '../tuning.ts';
-import type { GameState, OffspringCandidate, Variety } from '../types.ts';
+import type { GameState, OffspringCandidate } from '../types.ts';
 import type { AppleAssetId } from '../render/appleAssets.ts';
 import { generateVarietyName } from './names.ts';
-import { rollOffspringVisual } from './rarity.ts';
+import { unlockedCommonIds, weightedPick } from './rarity.ts';
 
 type Slot = 'A' | 'B' | 'C' | 'D';
 const SLOTS: Slot[] = ['A', 'B', 'C', 'D'];
@@ -10,18 +10,47 @@ const SLOTS: Slot[] = ['A', 'B', 'C', 'D'];
 // The five genetic traits, in the fixed order used throughout this file's
 // stat-vector math — the same order the radar chart displays them in:
 // Sweetness, Size, Yield, Growth, Freshness.
-type Stats5 = [number, number, number, number, number];
+export type Stats5 = [number, number, number, number, number];
 
-function clamp(v: number, min = 0, max = 100): number {
+// A breeding parent needs only these fields — a permanent Library Line
+// (Variety) satisfies this structurally as-is, and Game.ts builds one of
+// these directly from a one-use Breeding Specimen (borrowing color/pattern
+// from the Specimen's source Line, since a Specimen doesn't persist its
+// own — see PROJECT.md section 9/11) without needing a large parent-model
+// rewrite. See Game.breedParentFromSpecimen.
+export interface BreedParent {
+  visualId: AppleAssetId;
+  // The Common Visual this parent's lineage actually produces as ordinary
+  // fruit — see types.ts's Variety doc comment. Always identical to
+  // visualId for a Common parent.
+  baseVisualId: AppleAssetId;
+  color: AppleColor;
+  pattern: ApplePattern;
+  sweetness: number;
+  size: number;
+  yieldStat: number;
+  growth: number;
+  freshness: number;
+  generation: number;
+}
+
+export function clamp(v: number, min = 0, max = 100): number {
   return Math.max(min, Math.min(max, v));
 }
 
-function statsOf(v: Variety): Stats5 {
+export function statsOf(v: BreedParent): Stats5 {
   return [v.sweetness, v.size, v.yieldStat, v.growth, v.freshness];
 }
 
-function sumStats(s: Stats5): number {
+export function sumStats(s: Stats5): number {
   return s[0] + s[1] + s[2] + s[3] + s[4];
+}
+
+/** Uniformly scales `raw` stats so their sum matches targetBudget, individually clamped 0..100 — the shared hidden-budget mechanism reused by both breeding candidates (below) and Orchard Specimen mutation (see systems/specimen.ts). */
+export function scaleToBudget(raw: Stats5, targetBudget: number): Stats5 {
+  const rawBudget = sumStats(raw);
+  const scale = rawBudget > 0 ? targetBudget / rawBudget : 1;
+  return raw.map((v) => clamp(v * scale)) as Stats5;
 }
 
 function noise(amt: number): number {
@@ -66,42 +95,26 @@ function applyTradeoff(stats: Stats5): Stats5 {
 }
 
 // ------------------------------------------------------------------
-// Genetic Budget — a hidden, never-shown-to-the-player soft constraint
-// (this is the same hidden-potential/tradeoff mechanism the previous
-// 3-stat version used, adapted to all five traits and to the exact
-// slot-specific ranges this pass specifies) that keeps breeding from
-// becoming "every stat goes up every time." Each candidate's own
-// five-stat sum is nudged toward the parents' average budget by a small,
-// slot-specific delta, then individually clamped to 0..100 — the SHAPE
-// (which traits are strong/weak) comes entirely from the blend/tradeoff/
-// wildcard logic above; this budget step only controls the total.
+// Genetic Budget / TOTAL progression — every Breed operation now rolls
+// exactly ONE improvement value (see breedOffspring below) and rescales
+// ALL FOUR candidates to that identical shared target TOTAL
+// (Sweetness+Size+Yield+Growth+Freshness), hard-capped at 360 — so the
+// player's choice among A/B/C/D is about stat DISTRIBUTION/Visual/risk,
+// never "which one happened to roll the bigger total." The SHAPE (which
+// traits are strong/weak) still comes entirely from the blend/tradeoff/
+// wildcard logic below; scaleToBudget only controls the total.
 // ------------------------------------------------------------------
-const BUDGET_DELTA_RANGE: Record<Slot, [number, number]> = {
-  A: [-2, 3],
-  B: [-2, 3],
-  C: [-3, 5],
-  D: [-8, 8],
-};
-const BUDGET_CAP = 360;
-
-function applyBudgetTarget(raw: Stats5, parentBudget: number, slot: Slot): Stats5 {
-  const [dMin, dMax] = BUDGET_DELTA_RANGE[slot];
-  const targetBudget = clamp(parentBudget + dMin + Math.random() * (dMax - dMin), 0, BUDGET_CAP);
-  const rawBudget = sumStats(raw);
-  const scale = rawBudget > 0 ? targetBudget / rawBudget : 1;
-  return raw.map((v) => clamp(v * scale)) as Stats5;
-}
+const GENETIC_BUDGET_CAP = 360;
 
 /**
- * Generates one candidate's five raw genetic stats (before rounding).
+ * Generates one candidate's five raw genetic stats (before rounding),
+ * rescaled to the Breed operation's single shared target TOTAL.
  * A/B: mostly resemble one parent with a small blend + light mutation.
  * C: 50/50 blend, then an explicit boost/reduce tradeoff twist.
  * D: each trait independently inherits from whichever parent is chosen
  * per-trait, then gets a substantially larger mutation (5-18 points).
- * All four then get nudged toward the parents' average total budget by a
- * small, slot-specific amount (see applyBudgetTarget).
  */
-function generateStats(slot: Slot, pA: Stats5, pB: Stats5, parentBudget: number): Stats5 {
+function generateStats(slot: Slot, pA: Stats5, pB: Stats5, targetTotal: number): Stats5 {
   let raw: Stats5;
   switch (slot) {
     case 'A':
@@ -121,7 +134,7 @@ function generateStats(slot: Slot, pA: Stats5, pB: Stats5, parentBudget: number)
       }) as Stats5;
       break;
   }
-  return applyBudgetTarget(raw, parentBudget, slot);
+  return scaleToBudget(raw, targetTotal);
 }
 
 function pickVisualTrait<T extends string>(
@@ -160,17 +173,80 @@ function pickVisualTrait<T extends string>(
   return Math.random() < biasA ? valueA : valueB;
 }
 
+// ------------------------------------------------------------------
+// Visual (visualId + baseVisualId) inheritance — replaces the old
+// independent per-candidate rarity roll (see systems/rarity.ts's doc
+// comment). A/B are guaranteed to preserve their matching parent's
+// COMPLETE visual identity (visualId AND baseVisualId together, never
+// mixed — see PROJECT.md section 11), so a hard-won rare Specimen used as
+// a parent can never lose its Visual across all four candidates; C
+// recombines with no mutation; D is the only "wild miracle" chance, small
+// and Common-only — Rare/Epic Visuals can no longer be spontaneously
+// created by breeding at all (see PROJECT.md "Revise Rare / Epic Line
+// behavior"); they only enter the player's genetics as physical Orchard
+// Specimens (see systems/specimen.ts).
+// ------------------------------------------------------------------
+export interface VisualPair {
+  visualId: AppleAssetId;
+  baseVisualId: AppleAssetId;
+}
+
+/** Candidate D's mutation roll: a Common Visual different from both parents' (where possible), undiscovered-weighted, respecting the existing Common day-gating (Day 1 only C1/C2, Day 2+ all four — see systems/rarity.ts unlockedCommonIds). Null = no valid alternate Visual exists — caller falls back to ordinary parent inheritance rather than inventing one. */
+function rollDMutationVisual(day: number, parentAVisualId: AppleAssetId, parentBVisualId: AppleAssetId, discovered: readonly AppleAssetId[]): AppleAssetId | null {
+  const pool = unlockedCommonIds(day).filter((id) => id !== parentAVisualId && id !== parentBVisualId);
+  if (pool.length === 0) return null;
+  return weightedPick(pool, discovered);
+}
+
+function pickCandidateVisualPair(slot: Slot, day: number, a: VisualPair, b: VisualPair, discovered: readonly AppleAssetId[]): VisualPair {
+  switch (slot) {
+    case 'A':
+      return a;
+    case 'B':
+      return b;
+    case 'C':
+      return Math.random() < 0.5 ? a : b;
+    case 'D': {
+      if (Math.random() < TUNING.SPECIMEN_D_VISUAL_MUTATION_CHANCE) {
+        const mutated = rollDMutationVisual(day, a.visualId, b.visualId, discovered);
+        // A mutated Common Visual is always its own stable base — see
+        // types.ts's Variety doc comment ("Common Visuals are stable
+        // cultivars").
+        if (mutated) return { visualId: mutated, baseVisualId: mutated };
+      }
+      return Math.random() < 0.5 ? a : b;
+    }
+  }
+}
+
 export interface BreedResult {
   offspring: OffspringCandidate[];
   newlyDiscoveredColors: AppleColor[];
   newlyDiscoveredPatterns: ApplePattern[];
   newlyDiscoveredVisualIds: AppleAssetId[];
+  // The stronger parent's own TOTAL and the single shared target TOTAL
+  // every candidate was rescaled to (see PROJECT.md section 2) — surfaced
+  // here so Game.resolveBreeding can persist them for the result UI
+  // without needing to re-resolve (possibly already-consumed) parent data.
+  strongerParentTotal: number;
+  breedTargetTotal: number;
 }
 
-export function breedOffspring(parentA: Variety, parentB: Variety, day: number, state: GameState): BreedResult {
+export function breedOffspring(parentA: BreedParent, parentB: BreedParent, day: number, state: GameState): BreedResult {
   const pA5 = statsOf(parentA);
   const pB5 = statsOf(parentB);
-  const parentBudget = (sumStats(pA5) + sumStats(pB5)) / 2;
+
+  // Every Breed operation must improve total genetic strength (see
+  // PROJECT.md section 2): roll ONE +2..+6 improvement for the whole
+  // operation, applied to the STRONGER parent's own TOTAL, capped at the
+  // absolute genetic budget ceiling. All four candidates share this exact
+  // target — a candidate can still be genetically WEAKER than the
+  // stronger parent in one trait, but its own TOTAL always lands here.
+  const parentATotal = sumStats(pA5);
+  const parentBTotal = sumStats(pB5);
+  const strongerParentTotal = Math.max(parentATotal, parentBTotal);
+  const improvement = TUNING.BREED_IMPROVEMENT_MIN + Math.floor(Math.random() * (TUNING.BREED_IMPROVEMENT_MAX - TUNING.BREED_IMPROVEMENT_MIN + 1));
+  const breedTargetTotal = Math.min(GENETIC_BUDGET_CAP, strongerParentTotal + improvement);
 
   const generation = Math.max(parentA.generation, parentB.generation) + 1;
 
@@ -208,7 +284,7 @@ export function breedOffspring(parentA: Variety, parentB: Variety, day: number, 
   const newlyDiscoveredVisualIds: AppleAssetId[] = [];
 
   const offspring: OffspringCandidate[] = SLOTS.map((slot) => {
-    const [rawSweetness, rawSize, rawYield, rawGrowth, rawFreshness] = generateStats(slot, pA5, pB5, parentBudget);
+    const [rawSweetness, rawSize, rawYield, rawGrowth, rawFreshness] = generateStats(slot, pA5, pB5, breedTargetTotal);
 
     let forcedColor: AppleColor | null = null;
     if (forceColorSlot === slot) forcedColor = forceColorValue;
@@ -247,10 +323,17 @@ export function breedOffspring(parentA: Variety, parentB: Variety, day: number, 
 
     const traits = { color, pattern, sweetness: rawSweetness, size: rawSize, yieldStat: rawYield };
 
-    // Visual rarity roll — entirely separate from the color/pattern
-    // mutation above. Decides which of the 10 illustrations this offspring
-    // uses; day-gated (see systems/rarity.ts) and independent per slot.
-    const visualId = rollOffspringVisual(slot, day, parentA.visualId, parentB.visualId, discoveredVisualIdsWorking);
+    // Visual inheritance — entirely separate from the color/pattern
+    // mutation above. See pickCandidateVisualPair's doc comment / PROJECT.md
+    // for the exact A/B/C/D rules; visualId and baseVisualId always come
+    // from the SAME parent (or the same fresh Common mutation), never mixed.
+    const { visualId, baseVisualId } = pickCandidateVisualPair(
+      slot,
+      day,
+      { visualId: parentA.visualId, baseVisualId: parentA.baseVisualId },
+      { visualId: parentB.visualId, baseVisualId: parentB.baseVisualId },
+      discoveredVisualIdsWorking,
+    );
     const isNewVisualId = !discoveredVisualIdsWorking.includes(visualId);
     if (isNewVisualId) {
       discoveredVisualIdsWorking.push(visualId);
@@ -264,6 +347,7 @@ export function breedOffspring(parentA: Variety, parentB: Variety, day: number, 
       color,
       pattern,
       visualId,
+      baseVisualId,
       sweetness: Math.round(rawSweetness),
       size: Math.round(rawSize),
       yieldStat: Math.round(rawYield),
@@ -281,5 +365,5 @@ export function breedOffspring(parentA: Variety, parentB: Variety, day: number, 
     return candidate;
   });
 
-  return { offspring, newlyDiscoveredColors, newlyDiscoveredPatterns, newlyDiscoveredVisualIds };
+  return { offspring, newlyDiscoveredColors, newlyDiscoveredPatterns, newlyDiscoveredVisualIds, strongerParentTotal, breedTargetTotal };
 }

@@ -52,7 +52,13 @@ export function baseAppleValue(sweetness: number, size: number): number {
 export function priceHarvestedApple(variety: Variety, field: Field, state: GameState): PricedApple {
   const { sweetness, size } = effectiveStats(variety, field.policy);
   const perApple = baseAppleValue(sweetness, size);
-  const marketMult = marketMultiplierForVisual(variety.visualId, state.visualMarket);
+  // Ordinary fruit is priced using the Visual it ACTUALLY is —
+  // `baseVisualId` (see types.ts's Variety doc comment) — never the Line's
+  // special identity `visualId`. A Rare/Epic lineage's Market multiplier
+  // otherwise has no bearing on its everyday harvest, since it never grows
+  // that Visual as ordinary fruit (see PROJECT.md "Revise Rare / Epic Line
+  // behavior").
+  const marketMult = marketMultiplierForVisual(variety.baseVisualId, state.visualMarket);
   const shipMult = shippingMultiplier(state.shippingLevel);
   const baseValue = perApple * shipMult;
   const value = baseValue * marketMult;
@@ -214,7 +220,7 @@ export function makeInitialFruitSlots(
   const activeList = Array.from(activeIndices);
   const ripeCount = Math.round(activeList.length * fractionGrown);
   const order = shuffledRange(activeList.length).map((i) => activeList[i]);
-  const slots: FieldFruitSlot[] = Array.from({ length: n }, (_, i) => ({ ripe: false, timer: 0, active: activeIndices.has(i) }));
+  const slots: FieldFruitSlot[] = Array.from({ length: n }, (_, i) => ({ ripe: false, timer: 0, active: activeIndices.has(i), specimen: null }));
 
   order.slice(0, ripeCount).forEach((i) => {
     slots[i].ripe = true;

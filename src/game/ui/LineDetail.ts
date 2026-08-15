@@ -1,7 +1,8 @@
 import Phaser from 'phaser';
 import type { Variety } from '../types.ts';
+import { TUNING } from '../tuning.ts';
 import { AppleVisual } from '../render/AppleVisual.ts';
-import { APPLE_RARITY } from '../render/appleAssets.ts';
+import { APPLE_RARITY, catalogLabel } from '../render/appleAssets.ts';
 import { RadarChart } from './RadarChart.ts';
 import { THEME } from './theme.ts';
 import { Button, text as mkText } from './uiKit.ts';
@@ -62,8 +63,23 @@ export function renderLineDetail(
   container.add(mkText(scene, textX, y + 42, `${line.visualId}  •  ${rarity}`, 22, rarityColor, rarity !== 'COMMON', true));
   container.add(mkText(scene, textX, y + 74, `Gen ${line.generation}`, 22, THEME.textMid, false, true));
 
+  let extraY = y + 108;
+  // Rare/Epic Lines grow ordinary baseVisualId fruit, not their special
+  // identity Visual (see PROJECT.md "Revise Rare / Epic Line behavior") —
+  // a short explanatory block so this doesn't read as a bug when the
+  // player plants one and sees ordinary fruit on the tree.
+  if (rarity !== 'COMMON') {
+    const multiplier = rarity === 'RARE' ? TUNING.RARE_MUTATION_AFFINITY_MULTIPLIER : TUNING.EPIC_MUTATION_AFFINITY_MULTIPLIER;
+    container.add(mkText(scene, textX, extraY, `SPECIAL LINEAGE · ${catalogLabel(line.visualId)}`, 18, '#8a6d1a', true));
+    extraY += 25;
+    container.add(mkText(scene, textX, extraY, `Stable Fruit: ${catalogLabel(line.baseVisualId)}`, 18, THEME.textMid));
+    extraY += 24;
+    container.add(mkText(scene, textX, extraY, `Mutation Affinity: ×${multiplier}`, 18, THEME.textMid));
+    extraY += 24;
+  }
+
   if (opts.pairingWithLabel) {
-    container.add(mkText(scene, textX, y + 108, opts.pairingWithLabel, 20, '#3b6db2', true));
+    container.add(mkText(scene, textX, extraY, opts.pairingWithLabel, 20, '#3b6db2', true));
   }
 
   const radarY = y + appleSizePx + 130;

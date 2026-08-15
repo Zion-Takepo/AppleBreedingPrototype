@@ -72,6 +72,10 @@ discovery).
   cultivation size bonus); which of the 10 illustrations is shown is the
   variety's `visualId` (see Visual Rarity below). Tree count/position/motion
   is presentation-only.
+- Occasionally one fruit slot shows a visibly different apple than the rest
+  of the field — a physical Breeding Specimen the player can harvest as
+  one-use Breed material rather than ordinary fruit; see "Orchard Mutation
+  / Breeding Specimen" below.
 - Cultivation policy (NORMAL / SWEETEN / GROW_BIG) changes apply
   immediately — since each apple's price is now locked in individually at
   the moment it's harvested (see Shipping Pipeline below), a policy change
@@ -219,6 +223,49 @@ never stored on a Line — always derived from `visualId` via `APPLE_RARITY`.
 
 - One breeding process at a time. First breeding is free, ~6s. Every
   breeding after costs $35, ~18s.
+- **Breed is a strategic pause**: while BREED is the active main screen
+  (parent selection, the LINES/SPECIMENS picker, Line/Specimen detail, the
+  stat-help modal, offspring comparison, KEEP/post-Breed UI — every one of
+  these is either rendered directly inside `BreedScreen`'s own content or
+  as a modal that blocks input to the rest of the scene while open, so
+  gating on "is BREED the active screen" alone already covers all of
+  them), the farm/day **simulation** is frozen — the digital day clock,
+  fruit growth/ripening, Specimen appearance rolls, the shipping queue,
+  and shipment cash all stop advancing. An in-progress Breed operation's
+  own countdown is deliberately NOT part of that freeze — it keeps
+  advancing and resolving even if the player stays on the BREED screen the
+  entire time, so parking there to "watch it brew" works exactly as it
+  always has. Implemented via `Game.update(dtSeconds, pauseFarmSimulation)`
+  — `scenes/MainScene.ts`'s `isBreedPauseActive()` is evaluated every
+  frame and passed straight through as that second argument, so
+  `Game.update()` itself is always called; only the farm/day-simulation
+  block inside it is conditionally skipped, while the breeding-timer block
+  runs unconditionally. Not a broad Phaser scene pause, and no persisted
+  pause flag, since the condition is purely derived from existing
+  (already-transient) `activeScreen`/day state each frame. Deliberately
+  NOT active while Closing is already in progress or the day has already
+  ended, so merely being on the BREED tab can never suspend an
+  already-started settlement flow. Because the farm/day simulation simply
+  isn't advanced while paused, there is no catch-up delta for it — leaving
+  BREED resumes farm time from the exact prior simulated moment. A small,
+  secondary `TIME PAUSED` label appears on every Breed sub-screen while
+  the pause is genuinely active (it describes the farm/day freeze, not the
+  breeding countdown, which the hint text on the in-progress screen
+  clarifies separately).
+- Either parent slot can be a permanent Library Line **or** a held
+  Breeding Specimen (see "Orchard Mutation / Breeding Specimen" below) —
+  Line×Line (including self-cross), Line×Specimen, Specimen×Line, and
+  Specimen×Specimen (including two different Specimens sharing the same
+  Visual) are all allowed; the same Specimen id can never occupy both
+  slots. A Specimen parent participates in the five-stat inheritance below
+  using its own five stats exactly like a normal genetic parent, and its
+  `sourceGeneration` stands in for `generation`; its Color/Pattern (needed
+  only for the legacy genetic-trait mutation system, see below) are
+  borrowed from its own source Line, since a Specimen doesn't persist
+  those itself. A Specimen parent is **consumed** — removed from the held
+  inventory — the instant BREED is confirmed/started (not on KEEP), so
+  reusing a rare find requires finding another one; a Library Line parent
+  is never consumed.
 - Every breeding produces exactly 4 offspring candidates (A/B/C/D), each
   inheriting all five genetic traits directly in raw stat units (not a
   normalized-weight system):
@@ -233,18 +280,65 @@ never stored on a Line — always derived from `visualId` via `APPLE_RARITY`.
     parent is the inheritance source (50/50), then applies a substantially
     larger mutation (±5-18 points). Highest variance of the four, but never
     simply "the strongest candidate."
-- **Genetic Budget** (hidden, never shown to the player — the same
-  hidden-potential/tradeoff mechanism from the original 3-stat design,
-  adapted to all five traits): each candidate's own five-stat total is
-  nudged toward the two parents' average total by a small, slot-specific
-  delta (A/B: -2..+3, C: -3..+5, D: -8..+8), hard-capped at 360, individual
-  stats clamped 0..100. This keeps breeding from becoming "every stat goes
-  up every time" while still allowing gradual long-term improvement. See
-  `systems/breeding.ts` `generateStats()`/`applyBudgetTarget()`.
+- **TOTAL progression / Genetic Budget** (hidden budget mechanism, never
+  shown to the player as a number — revised so breeding always feels like
+  genuine advancement): `TOTAL = Sweetness+Size+Yield+Growth+Freshness`.
+  Every Breed operation rolls exactly ONE shared improvement,
+  `TUNING.BREED_IMPROVEMENT_MIN..MAX` (+2..+6), applied to the **stronger**
+  parent's own TOTAL: `breedTargetTotal = min(360,
+  max(parentATotal, parentBTotal) + improvement)`. ALL FOUR candidates
+  (A/B/C/D) are then rescaled to this exact same shared target via
+  `systems/breeding.ts` `scaleToBudget()` — never four independent rolls —
+  so the player's choice among them is always about stat
+  distribution/specialization/Visual/risk, never "which one happened to
+  roll the bigger total." If the stronger parent is already at the 360
+  cap, `breedTargetTotal` stays exactly 360 (the one allowed exception to
+  "Breed always increases TOTAL") — breeding still freely redistributes
+  the five stats. Individual stats stay clamped 0..100. See
+  `systems/breeding.ts` `generateStats()`/`breedOffspring()`. The result
+  screen (below) shows this as a compact `TOTAL 267 → 272 (+5)` line,
+  identical on all four candidate cards since they share the target.
 - Visual traits (Color/Pattern) inherit from a parent with high probability;
   each slot has its own mutation chance (A/B low, C a little higher, D
   meaningfully higher) that can introduce an unseen trait. Entirely separate
-  from the five numeric genetic traits and from Visual Rarity below.
+  from the five numeric genetic traits and from Visual Rarity/Visual
+  inheritance below.
+- **Visual (`visualId` + `baseVisualId`) inheritance** (replaced the old
+  independent per-candidate rarity roll — see `systems/breeding.ts`
+  `pickCandidateVisualPair()`):
+  - **A** always shows Parent A's exact Visual; **B** always shows Parent
+    B's exact Visual — both 100% guaranteed, no mutation possible. This is
+    what guarantees a hard-won rare Specimen used as a parent can never
+    lose its Visual across all four candidates: at minimum, its matching
+    A or B candidate always preserves it.
+  - **C** is Parent A's or Parent B's Visual, 50/50 — recombination only,
+    never a mutation.
+  - **D** normally inherits Parent A's or Parent B's Visual 50/50, but has
+    a `TUNING.SPECIMEN_D_VISUAL_MUTATION_CHANCE` (10%) chance to instead
+    roll a mutated Visual **Common-only** (#001-#004, respecting the
+    existing Day-1-only-#001/#002 onboarding gate, Day 2+ all four),
+    undiscovered-weighted 2x, falling back to ordinary 50/50 inheritance
+    if no valid alternate Visual exists. Revised: Rare/Epic can no longer
+    be spontaneously created by breeding **at all**, on any day — A/B/C/D
+    together can never introduce a new Rare/Epic Visual. The only route
+    for a new Rare/Epic Visual is a physical Orchard Specimen (see
+    "Orchard Mutation / Breeding Specimen" below and its Mutation
+    Affinity).
+  - Whenever a candidate inherits a parent's `visualId`, it always
+    inherits that SAME parent's `baseVisualId` too (see "Orchard Mutation
+    / Breeding Specimen" below) — never mixed. A candidate D Common
+    mutation always sets `baseVisualId` equal to its own new `visualId`
+    (a freshly found stable cultivar).
+- **Five-stat info button**: a small circular "i" button (top-right, same
+  position on both the parent-selection and offspring-result screens)
+  opens a shared, reusable, large readable modal/panel
+  (`ui/StatHelpModal.ts` `openStatHelpModal()`) explaining what each of
+  the five genetic stats actually does in plain English — Sweetness/Size
+  affect value, Yield affects active-slot count, Growth affects regrow
+  speed, and Freshness is explicitly described as not yet affecting
+  economy (reserved for a future Shipping-decay mechanic). Same close
+  behavior as every other modal (X button only — no outside-click-close
+  exists anywhere in this codebase, so this doesn't invent one).
 - **KEEP exactly ONE** offspring into the permanent Library as a new Owned
   Line (`favorite`/`archived` both start false). Traits discovered by *any*
   of the 4 candidates are added to the Collection even if that candidate
@@ -260,8 +354,13 @@ never stored on a Line — always derived from `visualId` via `APPLE_RARITY`.
 All four candidates render simultaneously (`ui/BreedScreen.ts`
 `renderOffspringComparison`) — no paging. Each card shows only a top-left
 catalog label, its A/B/C/D title + role ("PARENT A TYPE" / "PARENT B TYPE"
-/ "RECOMBINED" / "WILDCARD"), a large apple, Gen, and a large labeled
-RadarChart; clicking a card only selects/previews it (highlighted border)
+/ "RECOMBINED" / "WILDCARD"), a large apple, Gen, a compact secondary
+`TOTAL 267 → 272 (+5)` progression line (identical on all four cards —
+see Breeding's TOTAL progression bullet above; `BreedScreen.ts`
+`formatTotalLine()`, sourced from `BreedingState.strongerParentTotal`/
+`breedTargetTotal`, persisted by `Game.resolveBreeding()` specifically so
+this survives a reload), and a large labeled RadarChart; clicking a card
+only selects/previews it (highlighted border)
 and never commits — only the selected candidate gets an exact five-stat +
 delta-from-parent-genetic-average readout (`(parentA+parentB)/2`, genetic
 values only, never cultivation-adjusted), and the KEEP button is absent
@@ -305,30 +404,264 @@ as the player left it — no auto-plant/favorite/re-select/re-breed.
 
 Separate from — and additive to — the genetic Sweetness/Size/Yield/Color/
 Pattern system above. Every offspring candidate (A/B/C/D) also gets a
-`visualId` picked from 10 painterly illustrations, rolled once at breeding
-time in `systems/rarity.ts` and stored permanently on the kept `Variety`.
-The 15 Orchard fruit slots are harvest presentation only and do not roll
-rarity themselves — they always show the planted variety's own `visualId`.
+`visualId` picked from 10 painterly illustrations (see Breeding's Visual
+inheritance subsection above) and stored permanently on the kept `Variety`.
+An ordinary Orchard fruit slot is harvest presentation only and always
+shows the planted variety's own `visualId` — except when it's holding a
+special mutation fruit (a Breeding Specimen), which shows that Specimen's
+own, different `visualId` instead; see "Orchard Mutation / Breeding
+Specimen" below.
 
 - Only three tiers exist: **Common** (C1-C4), **Rare** (R1-R4), **Epic**
   (E1-E2). No Uncommon or Legendary tier.
 - Day-gated unlock: C1/C2 from Day 1, C3 from Day 2, C4 from Day 3, Rare
   from Day 4, Epic from Day 6. Before its day, an ID has exactly zero
-  natural appearance chance (probability mass renormalizes into Common).
-- Base Rare/Epic odds once unlocked — A/B/C: 1.20% Rare, 0.06% Epic each;
-  D (wildcard): 2.40% Rare, 0.18% Epic (always 2x A/B/C).
-- On a Common result, there's a small chance (6% for A/B/C, 15% for D) to
-  surface an unlocked-but-not-yet-discovered Common ID instead of the usual
-  parent-resemblance pick; otherwise a Common result usually matches one of
-  the two parents' own Common visuals (same A/B/C/D resemblance bias as the
-  genetic traits).
-- On a Rare/Epic result, the specific ID is picked from the currently
-  unlocked pool with undiscovered IDs weighted 2x over already-discovered
-  ones — a soft nudge toward new content, not a duplicate-protection
-  guarantee.
+  natural appearance chance (probability mass renormalizes into Common) —
+  this table is shared by both the Orchard Specimen system and Breed's
+  Candidate D mutation below.
 - Old saves from before this system get a safe `C1` backfill for any
   missing `visualId`/`discoveredVisualIds` (see `systems/save.ts`); no
   crash, no forced re-roll.
+- **Breed's per-candidate Visual assignment** no longer rolls
+  independently per offspring — see Breeding's "Visual inheritance"
+  subsection below, which replaced it as part of the Orchard Mutation /
+  Breeding Specimen pass. Naturally-occurring Rare/Epic Visuals are now
+  mainly found as physical Orchard Specimens (see "Orchard Mutation /
+  Breeding Specimen" below) rather than rolled during breeding.
+
+## Orchard Mutation / Breeding Specimen
+
+Connects Orchard harvesting to Breed: occasionally an Orchard fruit slot
+visibly shows a different Visual Variety than the field's planted Line —
+"I personally found an unusual apple on this tree." Harvesting it gives a
+tangible, **one-use Breeding Specimen** (`GameState.specimens`,
+`systems/specimen.ts`) rather than shipping revenue. A Specimen can be
+selected directly as a Breed parent (see Breeding above) and is consumed
+the instant BREED starts; if the resulting offspring is KEPT, the find has
+become a permanent Owned Line. Three distinct states now exist:
+
+- **DISCOVERED** — the Visual Variety has been seen (Market/Collection-
+  eligible); doesn't imply ownership.
+- **SPECIMEN** — a specific individual special apple physically held by
+  the player: its own Visual and its own five genetic stats, one-use,
+  never added to the Library.
+- **OWNED LINE** — unchanged: a permanent Library Line, normally created
+  by KEEPing offspring.
+
+Every Line and Specimen also carries a **`baseVisualId`** alongside its
+identity `visualId` (see "Stable Common baseVisual / Mutation Affinity"
+below) — `visualId` is what it *is* (its special lineage/identity, shown
+in the Library/Market/Collection), `baseVisualId` is the Common Visual it
+*stably produces* as ordinary Orchard fruit. For a Common Visual the two
+are always identical; a Rare/Epic Line/Specimen's `baseVisualId` is always
+a Common id.
+
+**Specimen shape** (`BreedingSpecimen`, `types.ts`): `id`, `visualId`,
+`baseVisualId`, the five genetic stats
+(`sweetness`/`size`/`yieldStat`/`growth`/`freshness`), `foundDay`,
+`sourceLineId`, `sourceGeneration`. Never added to `GameState.library`,
+never given a permanent name, never shown with its raw `C1`/`R1`/`E1` id
+(always the catalog label).
+
+**Fruit-slot representation**: `FieldFruitSlot.specimen: BreedingSpecimen
+| null`. Generated the instant a fruit slot **becomes ripe** (whether via
+its own regrow timer or a guaranteed onboarding spawn), never later at
+harvest time — this is what makes save/reload unable to reroll it. A
+non-null `specimen` on a ripe slot makes `OrchardTreeLayer` show that
+Specimen's own `visualId`/`size` on that one physical apple instead of the
+field's planted Line's ordinary `baseVisualId`, reverting once it's
+harvested/regrown as ordinary fruit (`render/OrchardTreeLayer.ts`
+`sync()`).
+
+**Guaranteed onboarding specimens** (`Game.maybeSpawnGuaranteedSpecimen`,
+gated by the persisted `day1SpecimenGuaranteeUsed`/
+`day2SpecimenGuaranteeUsed` flags so a reload/re-play can never duplicate
+or re-trigger one):
+
+- **Day 1** — exactly one **COMMON · #002** (`C2`), forced ripe
+  immediately on a planted Field whose own Line visual isn't already `C2`
+  when such a Field exists. Teaches the physical-specimen mechanic itself
+  (`C2` may already be owned — that's intentional).
+- **Day 2** — exactly one **COMMON · #003 or COMMON · #004**: whichever
+  is still undiscovered if only one is; 50/50 otherwise. Deliberately
+  supersedes `C4`'s normal Day 3 unlock gate (see Visual Rarity above) —
+  this guarantee alone may reveal `C4` a day early.
+- **Day 3 onward** — no more guaranteed drops; appearance becomes
+  probability-based (below). No normal random roll ever happens on Day 1
+  or Day 2.
+
+**Day 3+ random appearance** (`Game.maybeGenerateRandomSpecimen` →
+`systems/specimen.ts` `rollOrchardSpecimen`, rolled once per ordinary
+fruit slot the instant it ripens — one mutually exclusive tier roll, so a
+fruit can never become multiple tiers): Common `TUNING.SPECIMEN_COMMON_CHANCE`
+(0.30%) from Day 3, Rare `SPECIMEN_RARE_CHANCE` (0.05%) from Day 4, Epic
+`SPECIMEN_EPIC_CHANCE` (0.005%) from Day 6 — no daily cap, further boosted
+for a planted Rare/Epic Line's own special Visual by its Mutation Affinity
+(see below). The specific Visual is chosen from that day's unlocked tier
+pool (Visual Rarity's table above), excluding the planted Line's ordinary
+`baseVisualId` (so the player can actually notice it — this is literally
+what the tree is otherwise showing, see "Ordinary fruit rendering /
+selling" below) and undiscovered-weighted 2x; falls back to an ordinary
+fruit if no valid alternate Visual exists rather than fabricating one.
+
+### Stable Common baseVisual / Rare-Epic Line behavior
+
+A Rare/Epic Specimen can still be bred and KEPT into a permanent Line —
+but the player can no longer plant that Line and mass-produce Rare/Epic
+fruit forever. Keeping a rare find captures its **special genetic
+identity/lineage**, not an "infinite factory" for its Visual.
+
+- **Common Lines (#001-#004) are stable cultivars**:
+  `baseVisualId = visualId` always. Planting one produces that exact
+  Visual continuously, unchanged from before this pass.
+- **Rare/Epic Lines are unstable special traits**: `baseVisualId` is a
+  Common id, inherited unchanged through breeding from whichever parent
+  contributed the special `visualId` (see Breeding's Visual inheritance
+  above — visual and base always travel together from the same parent,
+  never mixed). Example: a `COMMON · #001` tree spontaneously produces one
+  `EPIC · #009` Specimen — that Specimen has `visualId #009`,
+  `baseVisualId #001`. If bred and KEPT, the resulting Line is identified
+  in the Library as `EPIC · #009`, but planting it grows ordinary
+  `COMMON · #001` fruit, not a tree full of `#009`. The Line instead gains
+  a permanent **Mutation Affinity** for `#009` (below) — "I captured the
+  #009 bloodline," not "I unlocked an infinite #009 factory."
+- **Specimen `baseVisualId` at creation** (`Game.buildSpecimen` →
+  `systems/specimen.ts` `deriveSpecimenBaseVisualId()`, set once and never
+  re-derived): a **Common**-tier specimen's `baseVisualId` is its own
+  fresh `visualId` (a newly found stable cultivar); a **Rare/Epic**-tier
+  specimen's `baseVisualId` is inherited from the *planted source Line's
+  own* `baseVisualId` — never the source Line's `visualId`. This is why a
+  second-generation mutation (a Rare/Epic Line that itself sprouts another
+  Rare/Epic Specimen) still traces back to the original Common ordinary
+  fruit, not to the intermediate special Visual.
+- **Mutation Affinity** (`systems/specimen.ts` `mutationAffinityFor`):
+  a Rare Line's own special Visual gets `TUNING.RARE_MUTATION_AFFINITY_MULTIPLIER`
+  (×10) recurrence affinity; an Epic Line's own special Visual gets
+  `TUNING.EPIC_MUTATION_AFFINITY_MULTIPLIER` (×20). Applies **only** to
+  that exact Visual — a `#009` Line does not boost `#010`, a `#005` Line
+  does not boost `#006`/`#007`/`#008` — and never stacks by generation
+  (the multiplier is a pure function of the Line's own `visualId` alone;
+  breeding `#009` into itself repeatedly stays exactly ×20, never
+  ×20→×400). Implemented as an ADDITIONAL independent per-ripening chance
+  layered on top of (not replacing) the Visual's normal within-tier
+  baseline share (`systems/specimen.ts` `affinityBonusChance` =
+  `basePerSpecificChance(tier, day) * (multiplier - 1)`, where
+  `basePerSpecificChance` ≈ tier's base chance ÷ number of visuals in that
+  tier) — checked first, and only falls through to the ordinary
+  mutually-exclusive tier roll if it doesn't fire, so one fruit still
+  becomes at most one Specimen. This targets the matching Visual's
+  ABSOLUTE occurrence rate at roughly `multiplier`× the non-affinity
+  baseline (not merely its selection weight *after* a Rare/Epic tier
+  already occurred) — e.g. Rare: ~0.0125% baseline + ~0.1125% bonus ≈
+  0.125% total (10×); Epic: ~0.0025% baseline + ~0.0475% bonus ≈ 0.05%
+  total (20×). Still respects the existing day gates — a Rare affinity
+  cannot fire before Day 4, Epic before Day 6.
+- **Ordinary fruit rendering / selling**: a planted Field always shows
+  (and prices) its Line's `baseVisualId`, never `visualId`
+  (`render/OrchardTreeLayer.ts` `sync()`; `systems/economy.ts`
+  `priceHarvestedApple()` → `marketMultiplierForVisual(variety.baseVisualId, ...)`).
+  A Rare/Epic Line's own Market price (keyed by its `visualId`) therefore
+  has little/no direct sale usage yet in this pass — Rare/Epic Specimens
+  are still automatically preserved for breeding, not shipped (see
+  "Harvesting a Specimen" above); a sell-Specimen feature is explicitly
+  out of scope. `ui/OrchardScreen.ts` shows a small "Growing: COMMON ·
+  #001 (Special Lineage: EPIC · #009)" note whenever a planted Line's
+  `visualId` differs from its `baseVisualId`, and `ui/LineDetail.ts`
+  shows a similar "SPECIAL LINEAGE · #009 / Stable Fruit: COMMON · #001 /
+  Mutation Affinity: ×20" block in the Library Picker's detail panel — no
+  permanent Visual Variety names invented, no raw internal ids shown.
+- **KEEP / ownership semantics are unchanged**: KEEPing a Rare/Epic
+  offspring still makes that Visual **OWNED** (`Game.isVisualIdOwned()`
+  still derives purely from `Library.some(v => v.visualId === id)`, keyed
+  on identity `visualId`, never `baseVisualId`) — Market may still show it
+  as OWNED. That's intentional: the Line owns the special genetic
+  identity/affinity; its normal Orchard production is `baseVisualId`.
+  Holding a Specimen alone (never KEPT into a Line) does NOT make its
+  Visual OWNED.
+
+**Specimen stat generation** (`systems/specimen.ts`
+`generateSpecimenStats`) — a mutation of the Line it grew on, never five
+unrelated random stats: start from the source Line's five stats, apply an
+independent integer ±4 mutation to each, then one additional major
+mutation (magnitude 8-12, random sign) to one randomly chosen stat, then
+rescale to a hidden budget target of `sourceTotal + randInt(-3..+5)`
+(capped 360, same absolute cap as breeding) via the exact
+`scaleToBudget()` helper breeding's own candidates use
+(`systems/breeding.ts`). Rarity of the Visual never buys a stat-budget
+advantage — an Epic specimen can be genetically mediocre and a Common one
+exceptional.
+
+**Discovery timing**: a new Visual becomes DISCOVERED the moment the
+special fruit **appears** (becomes ripe), not when harvested — added to
+`discoveredVisualIds` and given a safe baseline/STABLE Market entry via
+the same `Game.registerVisualDiscovery()` path breeding discovery also
+uses now, with no extra random Market move on the discovery day (its
+first real movement is the next daily Market update, same as always).
+
+**Harvesting a Specimen**: removed from its fruit slot through the normal
+harvest/rotation lifecycle (`Game.harvestFruitSlot`) — the ONE shared path
+every harvest route (direct click/sweep, HARVEST ALL, Closing's automatic
+ripe-fruit collection) already goes through, so all three preserve a
+Specimen identically with no special-casing needed per route. It is added
+to `GameState.specimens`, never queued for shipping, never paid as normal
+sale revenue, and never rerolled — exactly the record generated when the
+fruit appeared.
+
+**Breed parent selection**: the Library Picker (`ui/LibraryPicker.ts`)
+gained a `LINES | SPECIMENS` source switch; a Specimen card
+(`ui/SpecimenCard.ts`)/detail panel (`ui/SpecimenDetail.ts`) shows its
+apple image, catalog rarity/number, `SPECIMEN` badge, Found Day, a labeled
+RadarChart, and a `ONE USE` reminder — no customName, no favorite star, no
+Gen number (a Specimen has none of those). `GameState.recentParentIds`
+still tracks Lines only. Selection is represented as a `BreedParentRef`
+(`{ kind: 'LINE' | 'SPECIMEN', id }`) threaded through `Game.startBreeding`
+and BreedScreen's Parent A/B state; the same Specimen id is excluded from
+the other slot's picker (and BREED is disabled as a defense-in-depth
+backstop) so it can never occupy both slots at once.
+
+**Consumption**: a Specimen parent is removed from `GameState.specimens`
+atomically inside `Game.startBreeding()`, the instant BREED is
+confirmed — not later on KEEP, so a rare find can't be reused repeatedly
+while fishing for a perfect candidate. Its full data is snapshotted onto
+`BreedingState.parentA/BSpecimenSnapshot` at that same moment, since
+`resolveBreeding()` runs later (once the timer elapses) and can no longer
+look the by-then-consumed Specimen up by id — this snapshot is itself
+persisted, so a reload mid-breeding still resolves correctly. No
+refund/reroll mechanic exists.
+
+**Save migration**: old saves backfill `specimens: []`,
+`day1/day2SpecimenGuaranteeUsed: false`, per-slot `specimen: null`,
+`BreedingState.parentA/BKind: 'LINE'` with null snapshots, and
+`BreedingState.strongerParentTotal`/`breedTargetTotal: null`
+(`systems/save.ts`). A save still on Day 1 or Day 2 with the guarantee not
+yet recorded as spawned receives it once on load; a Day 3+ save never gets
+a Day-1/Day-2 specimen fabricated retroactively. Every Line/Specimen
+missing `baseVisualId` backfills it: Common ones to their own `visualId`
+(always exactly correct); a Rare/Epic Specimen recovers it from its
+still-present source Line's own `baseVisualId` (Specimens track
+`sourceLineId`, so real provenance exists); a Rare/Epic Line has no
+tracked parent lineage to recover from at all, so it safely falls back to
+its own `visualId` too (never a crash, never fabricated data — the same
+"safe fallback over fabrication" philosophy the rest of this file already
+uses).
+
+Verification: `scripts/verify-specimens.ts` (`node
+scripts/verify-specimens.ts`) — guarantees, Day-3+ appearance
+probabilities, stat generation, discovery timing, all four harvest routes,
+parent selection (Line×Line/Line×Specimen/Specimen×Specimen/rejecting a
+duplicate specimen id), consumption timing + save/reload, the A/B/C/D
+Visual+base inheritance rules (including Candidate D's now-Common-only
+mutation), Breed TOTAL progression (shared target, +2..+6 range, 360 cap
+and its one exception), `baseVisualId` derivation/propagation/ordinary
+pricing, Mutation Affinity's absolute-rate math (both the exact bonus
+formula and an end-to-end ~10x/~20x statistical check, including that
+sibling Rare/Epic visuals stay unboosted), and old-save migration
+(including `baseVisualId` recovery). The Breed strategic-pause GATE itself
+is a `scenes/MainScene.ts`-level conditional and can't be exercised from
+this Node script — documented there as an explicit limitation, along with
+Phaser-rendered UI (the Specimen's illustration actually swapping on the
+tree, the picker's LINES/SPECIMENS toggle, the stat-help modal/info
+buttons), matching `scripts/verify-market.ts`'s own convention.
 
 ## Economy
 
@@ -659,7 +992,12 @@ visualId/discoveredVisualIds, per-slot `active` flags, `growth`/`freshness`
 on any Variety that predates the five-trait system (defaulted to 50
 without touching existing Sweetness/Size/Yield), and — since the Library
 pass — `customName` (from the old `name` field), `favorite`/`archived`
-(both default false), and `recentParentIds` (default `[]`). A save with no
+(both default false), and `recentParentIds` (default `[]`). Since the
+Orchard Mutation / Breeding Specimen pass: `specimens: []`, per-slot
+`specimen: null`, `day1/day2SpecimenGuaranteeUsed: false` (a save still on
+Day 1/2 with the guarantee not yet spawned receives it once on load, never
+retroactively on a Day 3+ save), and `BreedingState.parentA/BKind: 'LINE'`
+with null specimen snapshots. A save with no
 Library at all gets seeded with the same two starting Lines a brand-new
 game gets (`systems/starterLines.ts`, shared by both `Game.ts` and
 `save.ts` to avoid a circular import) rather than being left unplayable.
@@ -707,75 +1045,6 @@ this is built yet — recorded here so intent survives until each piece is
 actually implemented. Update each subsection into the relevant section above
 (and remove it from here) once it ships.
 
-### Orchard Mutation / Breeding Specimen / Breed connection
-
-Not implemented yet — recorded here as the next CORE gameplay pass, ahead of
-the UI redesign. Playtesting surfaced a structural weakness: Orchard
-harvesting and Breed currently feel disconnected. The player starts with two
-permanent Library Lines and can breed those same Lines indefinitely, so
-harvesting apples doesn't feel like it directly supplies meaningful breeding
-material. The approved fix is a new loop:
-
-```
-Orchard mutation / special fruit → Breeding Specimen → Breed → KEEP → permanent Owned Line
-```
-
-This introduces a third concept, deliberately distinct from the two that
-already exist:
-
-- **DISCOVERED** — the Visual Variety has been seen and can appear in
-  systems like Market/Collection (existing behavior, unchanged — see Visual
-  Rarity and Market V1 above).
-- **SPECIMEN** (new) — the player physically obtained one particular
-  special apple from the Orchard: temporary, tangible, one-use breeding
-  material, usable directly as a Breed parent and consumed when used.
-- **OWNED LINE** — a permanent Library Line, normally created by KEEPing an
-  offspring (existing behavior, unchanged).
-
-Approved conceptual direction: occasionally an Orchard fruit slot can
-visibly show a different Visual Variety than the field's planted Line —
-meant to read as "I personally found an unusual apple on this tree," not as
-a silent Collection unlock. Harvesting that specific fruit gives a tangible
-one-use Breeding Specimen rather than merely flagging a new Discovery. That
-Specimen can later be selected directly as a Breed parent and is consumed
-when bred; if the resulting offspring is KEPT, the player has converted a
-temporary find into a permanent Owned Line. The goal is to make "I
-personally found this rare apple" matter directly in breeding gameplay,
-connecting Orchard play to Breed rather than adding another encyclopedia
-entry.
-
-**Guaranteed early Orchard specimens (approved onboarding requirement for
-this pass, not yet implemented):** these exist purely so the player
-definitely experiences Orchard → unusual apple → harvest → Specimen → Breed
-at least twice early on, without relying on RNG.
-
-- **Day 1** — guarantee exactly one Green Visual specimen, **COMMON · #002**,
-  through the future Specimen system. #002 is already part of the initial
-  visual set (it's `STARTER_GREEN`'s own visualId) and may already be
-  owned, so this is deliberately *not* a new-visual unlock — its purpose is
-  the low-risk tutorial: teaching that a visibly different individual apple
-  can appear on the tree, can be harvested as itself, and becomes tangible
-  breeding material.
-- **Day 2** — guarantee exactly one specimen of **COMMON · #003 OR
-  COMMON · #004** — the player's first guaranteed specimen from outside the
-  initial red/green visual set, establishing that genuinely new Visual
-  Varieties (not just already-known ones) can be physically found in the
-  Orchard and carried into breeding. Whether #003 vs #004 is random,
-  predetermined, or planted-Line-dependent is explicitly undecided — left
-  to the Specimen design pass.
-- **Day 3 onward** — no more guaranteed daily drops. Specimen/mutation
-  appearances become probability-based from here on, and Rare/Epic
-  specimens must still respect their existing day-gated unlock progression
-  (Rare from Day 4, Epic from Day 6 — see Visual Rarity above). The actual
-  Day-3+ probabilities are explicitly undecided — to be designed together
-  with Specimen stat generation, visual inheritance, Breed A/B/C/D
-  behavior, and Rare/Epic preservation rules, before implementation.
-
-Explicitly out of scope for this recorded direction (design-only, no code):
-Specimen stat generation, visual inheritance rules, Breed A/B/C/D specimen
-behavior, Rare/Epic preservation rules, Day-3+ probabilities, and Specimen
-UI. None of this has been implemented.
-
 ### Orchard / global UI redesign
 
 Direction: warm painterly orchard look — cream rounded cards, dark green top
@@ -802,16 +1071,51 @@ shipping/basket status + processing status portion of the lower-right card
 already has a real implementation to surface (see Shipping Pipeline above)
 once this redesign happens — it isn't placeholder-only anymore.
 
+### Mutation Spray (future money sink — design only, not implemented)
+
+A future paid farm treatment: spend cash to temporarily increase
+mutation/Specimen odds. Must never guarantee a Rare/Epic outcome — a
+probability nudge only, same spirit as the existing Day-3+ Orchard roll
+and Mutation Affinity, never a purchasable certainty. Exact price and
+multiplier are not decided yet; not implemented in this pass.
+
+### Shipping Infrastructure (future system — design only, not implemented)
+
+The current farm-wide Processing Queue (see Shipping Pipeline above) has
+effectively unlimited throughput once Closing's accelerated Final
+Shipment cadence kicks in, which trivially erases any bottleneck at day's
+end. A future pass is expected to introduce real finite shipping/packing
+capacity plus shipping-speed and capacity upgrades, so Closing can no
+longer simply flush an unbounded queue for free. Exact
+implementation/numbers are not decided yet; explicitly out of scope for
+this pass (no Shipping Box, no capacity/speed upgrades implemented here).
+
+### Market graph polish (future UI pass — design only, not implemented)
+
+`ui/MarketScreen.ts`'s current sparkline is self-normalized per card (see
+Market V1 above) rather than sharing one shared scale across cards. A
+future polish pass is expected to give it a fixed shared vertical scale, a
+visibly marked 0% baseline, and a clearer visual distinction between a
+Visual's current level and today's own movement — conceptually something
+like:
+
+```
++10%
+Today -4pt ▼
+```
+
+Not implemented in this pass; the current Market V1 graph is unchanged.
+
 ### Revised priority order
 
-Shipping Pipeline, Day Cycle, Daily Operating Cost, and Market V1 are done
-(see their sections above) — remaining order:
+Shipping Pipeline, Day Cycle, Daily Operating Cost, Market V1, and Orchard
+Mutation / Breeding Specimen are done (see their sections above) —
+remaining order:
 
-1. Orchard Mutation / Breeding Specimen / Breed connection
-2. Orchard / global UI redesign
-3. Freshness integration
-4. Collection / Library / Replant cleanup
-5. Final art / animation / sound / font polish
+1. Orchard / global UI redesign
+2. Freshness integration
+3. Collection / Library / Replant cleanup
+4. Final art / animation / sound / font polish
 
 Market V1 was deliberately built ahead of the UI redesign: the prototype
 already had a reasonably engaging core loop, and the open question was

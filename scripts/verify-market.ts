@@ -318,7 +318,12 @@ function clearStorage(): void {
   const game = new Game();
   const field = game.state.fields[0] as Field;
   const variety = game.getVariety(field.varietyId)!;
-  const slotIndex = field.slots.findIndex((s) => s.active);
+  // Field 1's own active slots may include the guaranteed Day-1 tutorial
+  // Specimen (see PROJECT.md Orchard Mutation / Breeding Specimen) — that
+  // slot deliberately does NOT enter the Processing Queue on harvest (see
+  // section 8 below/verify-specimens.ts), so this ordinary-pricing check
+  // must pick a slot that ISN'T holding one.
+  const slotIndex = field.slots.findIndex((s) => s.active && !s.specimen);
   field.slots[slotIndex].ripe = true; // force-ripen deterministically instead of waiting on the regrow timer
 
   game.harvestFruitSlot(field.id, slotIndex);

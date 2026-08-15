@@ -137,6 +137,56 @@ export const TUNING = {
   },
 
   SAVE_KEY: 'apple-breeding-prototype-save-v1',
+
+  // Orchard Mutation / Breeding Specimen (see PROJECT.md "Orchard Mutation /
+  // Breeding Specimen / Breed connection" and systems/specimen.ts). A
+  // Specimen's five stats are a mutation of its source Line: an independent
+  // integer mutation per stat, one extra major mutation on a random stat,
+  // then rescaled to a hidden budget target — reusing the exact same
+  // scaleToBudget mechanism breeding.ts's candidates use.
+  SPECIMEN_STAT_MINOR_MUTATION: 4, // each of the 5 stats: independent +/-4 integer mutation
+  SPECIMEN_STAT_MAJOR_MUTATION_MIN: 8, // the one extra major mutation applied to a single random stat: magnitude 8..12
+  SPECIMEN_STAT_MAJOR_MUTATION_MAX: 12,
+  SPECIMEN_BUDGET_DELTA_MIN: -3, // hidden budget target = source total + randInt(-3..+5)
+  SPECIMEN_BUDGET_DELTA_MAX: 5,
+  SPECIMEN_BUDGET_CAP: 360, // same absolute cap as breeding's own hidden budget
+
+  // Day 3+ random per-ripened-fruit specimen appearance chance — ONE
+  // mutually-exclusive tier roll per ripening (see Game.maybeGenerateRandomSpecimen).
+  SPECIMEN_RANDOM_START_DAY: 3,
+  SPECIMEN_COMMON_CHANCE: 0.003, // 0.30%, from Day 3
+  SPECIMEN_RARE_CHANCE: 0.0005, // 0.05%, from Day 4
+  SPECIMEN_EPIC_CHANCE: 0.00005, // 0.005%, from Day 6
+
+  // Breed Candidate D's own small "wild miracle" Visual-mutation chance (see
+  // breeding.ts pickCandidateVisualId). Revised: D's mutation target is now
+  // Common-only (#001-#004) — Rare/Epic Visuals can no longer be
+  // spontaneously created by breeding at all; they only ever enter the
+  // player's genetics as physical Orchard Specimens (see
+  // systems/specimen.ts's Mutation Affinity below).
+  SPECIMEN_D_VISUAL_MUTATION_CHANCE: 0.1, // 10% of the time, D rolls a mutated Common visual instead of inheriting a parent's
+
+  // Breed TOTAL progression (see breeding.ts breedOffspring / PROJECT.md
+  // "Every Breed must improve total genetic strength"). ONE improvement
+  // roll per Breed operation (not per candidate) — every candidate A/B/C/D
+  // is then rescaled to the SAME resulting target total, so the player's
+  // choice among them is about distribution/Visual, never "which one
+  // rolled the bigger number."
+  BREED_IMPROVEMENT_MIN: 2,
+  BREED_IMPROVEMENT_MAX: 6,
+
+  // Rare/Epic Mutation Affinity (see systems/specimen.ts
+  // mutationAffinityFor/affinityBonusChance and PROJECT.md "Revise Rare /
+  // Epic Line behavior"). A permanent Rare/Epic Line makes ITS OWN special
+  // Visual (never sibling Rare/Epic ids) more likely to recur as a Day-3+
+  // Orchard Specimen on fields it's planted on — applied as an ADDITIONAL
+  // independent per-ripening chance on top of that Visual's normal
+  // within-tier baseline share, targeting an absolute occurrence rate
+  // roughly this many times the non-affinity baseline. Never stacks by
+  // generation — always exactly this flat multiplier for the Line's own
+  // visualId, however many generations deep.
+  RARE_MUTATION_AFFINITY_MULTIPLIER: 10,
+  EPIC_MUTATION_AFFINITY_MULTIPLIER: 20,
 } as const;
 
 export const COLORS = ['Red', 'Green', 'Yellow', 'Purple'] as const;

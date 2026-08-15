@@ -248,10 +248,6 @@ class TreeNode {
     });
   }
 
-  setTraits(visualId: Variety['visualId'], size: number): void {
-    this.slots.forEach((slot) => slot.setTraits(visualId, size));
-  }
-
   tickGustAll(scene: Phaser.Scene, dtSeconds: number): void {
     this.slots.forEach((slot) => slot.tickGust(scene, dtSeconds));
   }
@@ -273,6 +269,12 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
   private trees: TreeNode[];
   private allSlots: FruitSlot[];
   private lastIdentityKey = '';
+  // Per-slot identity of whatever visual/size was last drawn on it (a
+  // Specimen id, or the planted Line's own id+rounded size) — lets a
+  // Specimen's own distinct apple illustration override the field's normal
+  // fruit on just that one slot, and revert once it's harvested/regrown as
+  // ordinary fruit, without re-drawing all 15 slots on every sync() call.
+  private lastSlotVisualKey: string[];
   private currentField: Field | null = null;
   private game: Game;
   // True while the primary pointer is held down, tracked globally (scene
@@ -301,6 +303,7 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
       return tree;
     });
     this.allSlots = this.trees.flatMap((tree) => tree.slots);
+    this.lastSlotVisualKey = new Array(this.allSlots.length).fill('');
     scene.add.existing(this);
 
     // Global hold-and-sweep: track primary-pointer state at the scene
@@ -340,8 +343,30 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     const identityKey = `${field.id}:${variety.id}:${field.policy}`;
     const hardReset = identityKey !== this.lastIdentityKey;
 
+    // Each slot shows either the planted Line's own visual, or — if it's
+    // currently holding a special mutation fruit — that Specimen's own
+    // visual/size instead (see PROJECT.md section 6: the player must be
+    // able to physically notice a different apple among the ordinary
+    // fruit). Only re-drawn when a slot's own identity actually changed
+    // (Specimen appeared/was harvested, or a hard field/variety switch),
+    // not every frame.
+    field.slots.forEach((s, i) => {
+      const specimen = s.specimen;
+      // Ordinary fruit always shows the Line's stable baseVisualId, never
+      // its special identity visualId — a Rare/Epic lineage grows its
+      // ordinary baseVisualId crop, with its own special Visual only ever
+      // appearing as a physical Specimen fruit (see PROJECT.md "Revise
+      // Rare / Epic Line behavior").
+      const visualId = specimen ? specimen.visualId : variety.baseVisualId;
+      const size = specimen ? specimen.size : eff.size;
+      const key = specimen ? `specimen:${specimen.id}` : `line:${variety.id}:${Math.round(size)}`;
+      if (hardReset || this.lastSlotVisualKey[i] !== key) {
+        this.allSlots[i].setTraits(visualId, size);
+        this.lastSlotVisualKey[i] = key;
+      }
+    });
+
     if (hardReset) {
-      this.trees.forEach((tree) => tree.setTraits(variety.visualId, eff.size));
       // Switching fields/variety: snap every slot straight to this field's
       // actual per-slot state — no replaying grow animations for fruit
       // that ripened while this field was in the background, and no

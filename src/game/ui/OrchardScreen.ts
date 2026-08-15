@@ -8,6 +8,7 @@ import { LAYOUT, THEME } from './theme.ts';
 import { Button, text as mkText } from './uiKit.ts';
 import { ToastQueue } from './modals.ts';
 import { openVarietyPickerModal } from './varietyPicker.ts';
+import { catalogLabel } from '../render/appleAssets.ts';
 
 // Ground y used by the (temporary) front-row trees, for positioning the
 // shipment box relative to them. Kept in sync with OrchardTreeLayer's own
@@ -231,6 +232,16 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     const statLine = `Sweetness ${Math.round(eff.sweetness)}  •  Size ${Math.round(eff.size)}  •  Yield ${variety.yieldStat}`;
     this.statLineText = mkText(this.scene, 16, statLineY, statLine, 22, THEME.textMid, false, true);
     this.mainView.add(this.statLineText);
+
+    // A Rare/Epic-planted field grows its ordinary baseVisualId fruit, not
+    // the Line's special identity visual (see PROJECT.md "Revise Rare /
+    // Epic Line behavior") — a small note so that isn't mistaken for a
+    // bug. Only depends on the planted Line, which only changes alongside
+    // a full mainView rebuild, so no update()-time counterpart is needed.
+    if (variety.visualId !== variety.baseVisualId) {
+      const note = `Growing ${catalogLabel(variety.baseVisualId)} (Special Lineage: ${catalogLabel(variety.visualId)})`;
+      this.mainView.add(mkText(this.scene, 16, statLineY + 26, note, 18, '#8a6d1a', true));
+    }
 
     // Cultivation policy buttons
     const policies: { id: CultivationPolicy; label: string }[] = [

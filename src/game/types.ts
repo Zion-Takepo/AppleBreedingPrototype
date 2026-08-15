@@ -35,7 +35,22 @@ export interface Variety {
   // remain genetic traits used elsewhere (market, contests, guarantees).
   // Rarity itself is never stored — always derived from this via
   // APPLE_RARITY to avoid a second source of truth.
+  //
+  // `visualId` is the Line's IDENTITY visual (its special lineage — what
+  // it's shown as in the Library/Market/Collection, and what OWNED is
+  // derived from). `baseVisualId` is the Common Visual it stably PRODUCES
+  // as ordinary Orchard fruit and what ordinary sale pricing uses (see
+  // PROJECT.md "Revise Rare / Epic Line behavior"). For a Common Line
+  // (#001-#004) the two are always identical — Common Visuals are stable
+  // cultivars. For a Rare/Epic Line, `baseVisualId` is always a Common id,
+  // inherited unchanged through breeding from whichever parent contributed
+  // the special `visualId` — planting a Rare/Epic Line grows ordinary
+  // `baseVisualId` fruit, with the Line's own Mutation Affinity (see
+  // systems/specimen.ts) making its special `visualId` more likely to
+  // recur as a physical Orchard Specimen, never as guaranteed mass
+  // production.
   visualId: AppleAssetId;
+  baseVisualId: AppleAssetId;
   favorite: boolean;
   // Archived Lines are excluded from the normal Parent Picker (Favorites/
   // Recent/All) but are not deleted — no destructive deletion exists yet.
@@ -51,6 +66,46 @@ export interface FieldFruitSlot {
   // activeSlotIndices) — inactive slots never tick, never ripen, and are
   // never harvestable.
   active: boolean;
+  // Set the instant this fruit becomes a special mutation fruit — generated
+  // when the slot's timer completes (becomes ripe), never later at harvest
+  // time, so save/reload can never reroll it (see systems/specimen.ts and
+  // Game.maybeGenerateRandomSpecimen/spawnGuaranteedSpecimen). Null for an
+  // ordinary fruit slot, growing or ripe.
+  specimen: BreedingSpecimen | null;
+}
+
+// One physical, one-use special apple obtained from the Orchard (see
+// PROJECT.md "Orchard Mutation / Breeding Specimen / Breed connection").
+// Distinct from a permanent Library Line: a Specimen is never added to the
+// Library, is consumed the instant it's used as a Breed parent, and cannot
+// be refunded/rerolled. `sweetness`/`size`/`yieldStat`/`growth`/`freshness`
+// use the exact same property names/types as Variety's five genetic stats
+// (a mutation of `sourceLineId`'s own stats — see systems/specimen.ts).
+export interface BreedingSpecimen {
+  id: string;
+  visualId: AppleAssetId;
+  // Set once at specimen-creation time and never re-derived later (see
+  // Game.buildSpecimen) — a Common-tier specimen's baseVisualId is always
+  // its own visualId (a freshly found stable cultivar); a Rare/Epic-tier
+  // specimen's baseVisualId is inherited from its source Line's own
+  // baseVisualId (see Variety's doc comment above), never its visualId.
+  baseVisualId: AppleAssetId;
+  sweetness: number;
+  size: number;
+  yieldStat: number;
+  growth: number;
+  freshness: number;
+  foundDay: number;
+  sourceLineId: string;
+  sourceGeneration: number;
+}
+
+export type BreedParentKind = 'LINE' | 'SPECIMEN';
+
+/** A Breed parent selection — either a permanent Library Line or a held Breeding Specimen, disambiguated by `kind` (see Game.startBreeding / ui/LibraryPicker.ts). */
+export interface BreedParentRef {
+  kind: BreedParentKind;
+  id: string;
 }
 
 export interface Field {
@@ -92,13 +147,32 @@ export interface OffspringCandidate extends Variety {
 export interface BreedingState {
   active: boolean;
   parentAId: string | null;
+  // Which kind parentAId/parentBId refer to. A Specimen parent is consumed
+  // (removed from GameState.specimens) the instant BREED starts, so its
+  // full data is snapshotted into parentASpecimenSnapshot/
+  // parentBSpecimenSnapshot at that same moment — resolveBreeding() (which
+  // runs later, once the breeding timer elapses) reads the snapshot rather
+  // than looking the (by-then-consumed) specimen back up by id.
+  parentAKind: BreedParentKind;
+  parentASpecimenSnapshot: BreedingSpecimen | null;
   parentBId: string | null;
+  parentBKind: BreedParentKind;
+  parentBSpecimenSnapshot: BreedingSpecimen | null;
   elapsed: number;
   duration: number;
   dayStarted: number;
   ready: boolean;
   offspring: OffspringCandidate[] | null;
   everBredOnce: boolean;
+  // Set alongside `offspring`/`ready` in Game.resolveBreeding (see
+  // PROJECT.md "Every Breed must improve total genetic strength") — the
+  // stronger parent's own TOTAL (Sweetness+Size+Yield+Growth+Freshness)
+  // and the single shared target TOTAL every one of the four candidates
+  // was rescaled to, purely so the result UI can display "TOTAL x -> y"
+  // without re-deriving it from (possibly already-consumed) parent data.
+  // Null before any breeding has ever resolved.
+  strongerParentTotal: number | null;
+  breedTargetTotal: number | null;
 }
 
 export type MarketModifiers = Partial<Record<AppleColor | ApplePattern, number>>;
@@ -154,6 +228,20 @@ export interface GameState {
   // The Library of Owned Lines (see Variety doc comment above). No slot
   // limit; entries are permanent unless archived.
   library: Variety[];
+  // Held one-use Breeding Specimens (see BreedingSpecimen doc comment
+  // above) — physical special apples harvested from the Orchard, not yet
+  // used as a Breed parent. Consumed (removed from this array) the instant
+  // BREED starts with one selected as a parent; never restored on
+  // save/reload once consumed, and never refunded if the offspring isn't
+  // KEPT.
+  specimens: BreedingSpecimen[];
+  // Guaranteed-onboarding bookkeeping (see PROJECT.md section 3): each flag
+  // flips true the moment that day's guaranteed Specimen is spawned, so a
+  // reload — or simply playing on past that day — can never spawn it a
+  // second time. Never retroactively backfilled for a save already past
+  // that day (see systems/save.ts).
+  day1SpecimenGuaranteeUsed: boolean;
+  day2SpecimenGuaranteeUsed: boolean;
   // Up to the 6 most-recently-used-as-parent Line ids, most recent first,
   // deduped (a Line reused as a parent moves back to the front rather than
   // creating a second entry). Persisted with the rest of GameState.

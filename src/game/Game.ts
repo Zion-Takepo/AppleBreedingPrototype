@@ -1,13 +1,16 @@
 import { TUNING } from './tuning.ts';
 import type {
+  BreedingSpecimen,
+  BreedParentRef,
   ContestResult,
   CultivationPolicy,
   DayLogEntry,
   Field,
+  FieldFruitSlot,
   GameState,
   Variety,
 } from './types.ts';
-import { breedOffspring } from './systems/breeding.ts';
+import { breedOffspring, statsOf, type BreedParent } from './systems/breeding.ts';
 import {
   activeSlotIndices,
   allSlotsActive,
@@ -22,6 +25,14 @@ import {
 import { advanceDailyMarket, initVisualMarket, initVisualMarketEntry } from './systems/market.ts';
 import { clearSave, loadState, saveState } from './systems/save.ts';
 import { freshStarterLines, STARTER_GREEN, STARTER_RED } from './systems/starterLines.ts';
+import {
+  chooseDay2GuaranteedVisual,
+  chooseGuaranteedSpecimenFieldIndex,
+  deriveSpecimenBaseVisualId,
+  generateSpecimenStats,
+  rollOrchardSpecimen,
+} from './systems/specimen.ts';
+import type { AppleAssetId } from './render/appleAssets.ts';
 
 function makeField(id: number, unlocked: boolean, varietyId: string | null, fractionGrown: number, variety: Variety | null): Field {
   const active = variety ? activeSlotIndices(variety.id, variety.yieldStat) : allSlotsActive();
@@ -51,6 +62,9 @@ function createInitialState(): GameState {
     // singletons directly (Library entries get mutated in place, e.g.
     // contest awards; see freshStarterLines()'s doc comment).
     library: freshStarterLines(),
+    specimens: [],
+    day1SpecimenGuaranteeUsed: false,
+    day2SpecimenGuaranteeUsed: false,
     recentParentIds: [],
     discoveredColors: ['Red', 'Green'],
     discoveredPatterns: ['Plain'],
@@ -60,13 +74,19 @@ function createInitialState(): GameState {
     breeding: {
       active: false,
       parentAId: null,
+      parentAKind: 'LINE',
+      parentASpecimenSnapshot: null,
       parentBId: null,
+      parentBKind: 'LINE',
+      parentBSpecimenSnapshot: null,
       elapsed: 0,
       duration: 0,
       dayStarted: 1,
       ready: false,
       offspring: null,
       everBredOnce: false,
+      strongerParentTotal: null,
+      breedTargetTotal: null,
     },
     irrigationLevel: 0,
     shippingLevel: 0,
@@ -98,6 +118,7 @@ export type GameEvent =
   | { type: 'breedingReady' }
   | { type: 'traitDiscovered' }
   | { type: 'dayClosed' }
+  | { type: 'specimenAcquired'; specimen: BreedingSpecimen }
   | { type: 'changed' };
 
 type Listener = (event: GameEvent) => void;
@@ -108,6 +129,11 @@ export class Game {
 
   constructor() {
     this.state = loadState() ?? createInitialState();
+    // Covers both a brand-new game (Day 1, flags false -> spawns) and an
+    // old save reload landing on Day 1/2 with the guarantee not yet
+    // recorded as spawned (see PROJECT.md section 16) — already-used flags
+    // make this a no-op on every subsequent reload.
+    this.maybeSpawnGuaranteedSpecimen();
   }
 
   on(listener: Listener): void {
@@ -129,6 +155,7 @@ export class Game {
   resetPrototype(): void {
     clearSave();
     this.state = createInitialState();
+    this.maybeSpawnGuaranteedSpecimen();
     this.notify();
   }
 
@@ -186,91 +213,113 @@ export class Game {
   // ----------------------------------------------------------------
   // Tick
   // ----------------------------------------------------------------
-  update(dtSeconds: number): void {
+  /**
+   * `pauseFarmSimulation` is the Strategic Pause gate (see PROJECT.md
+   * "Breed is a strategic pause" — set by MainScene while BREED is the
+   * active screen, false during Closing/dayEnded so an already-started
+   * settlement can never be suspended). It freezes only the farm/day
+   * simulation below (day clock, fruit growth/ripening, Specimen rolls,
+   * shipping queue, Closing-by-time) — NOT the Breed operation itself: an
+   * in-progress breeding's own countdown must keep advancing (and resolve)
+   * even while the player stays on the BREED screen the whole time, so
+   * that block always runs regardless of this flag.
+   */
+  update(dtSeconds: number, pauseFarmSimulation = false): void {
     let changed = false;
 
-    if (this.state.dayActive) {
-      this.state.dayTimeRemaining = Math.max(0, this.state.dayTimeRemaining - dtSeconds);
-      changed = true;
-    }
-    // 18:00 (dayTimeRemaining hits 0) triggers the exact same Closing
-    // procedure a manual END DAY click does (see beginClosing) — idempotent,
-    // so this firing again on a later frame (or DebugPanel's "Skip Day
-    // Timer" setting dayTimeRemaining=0 directly) can't double-close.
-    if (this.state.dayActive && this.state.dayTimeRemaining <= 0) {
-      this.beginClosing();
-      changed = true;
-    }
+    if (!pauseFarmSimulation) {
+      if (this.state.dayActive) {
+        this.state.dayTimeRemaining = Math.max(0, this.state.dayTimeRemaining - dtSeconds);
+        changed = true;
+      }
+      // 18:00 (dayTimeRemaining hits 0) triggers the exact same Closing
+      // procedure a manual END DAY click does (see beginClosing) — idempotent,
+      // so this firing again on a later frame (or DebugPanel's "Skip Day
+      // Timer" setting dayTimeRemaining=0 directly) can't double-close.
+      if (this.state.dayActive && this.state.dayTimeRemaining <= 0) {
+        this.beginClosing();
+        changed = true;
+      }
 
-    // Each of the 15 fruit slots per field regrows on its own independent
-    // timer now — there's no whole-field "growth cycle" to freeze, so
-    // slots keep regrowing continuously regardless of which field tab is
-    // selected or whether the day is still active (dayActive=false, e.g.
-    // the timer simply ran out). Once Closing has begun (state.closing —
-    // automatic 18:00 or manual END DAY) or the day is fully SETTLED
-    // (dayEnded), growth freezes: already-ripe fruit stays ripe (skipped
-    // below regardless), and partially-grown fruit stops advancing and
-    // stays frozen at its current progress.
-    if (!this.state.dayEnded && !this.state.closing) {
-      for (const field of this.state.fields) {
-        if (!field.unlocked || !field.varietyId) continue;
-        for (const slot of field.slots) {
-          if (!slot.active || slot.ripe) continue;
-          slot.timer -= dtSeconds;
-          if (slot.timer <= 0) {
-            slot.ripe = true;
-            changed = true;
+      // Each of the 15 fruit slots per field regrows on its own independent
+      // timer now — there's no whole-field "growth cycle" to freeze, so
+      // slots keep regrowing continuously regardless of which field tab is
+      // selected or whether the day is still active (dayActive=false, e.g.
+      // the timer simply ran out). Once Closing has begun (state.closing —
+      // automatic 18:00 or manual END DAY) or the day is fully SETTLED
+      // (dayEnded), growth freezes: already-ripe fruit stays ripe (skipped
+      // below regardless), and partially-grown fruit stops advancing and
+      // stays frozen at its current progress.
+      if (!this.state.dayEnded && !this.state.closing) {
+        for (const field of this.state.fields) {
+          if (!field.unlocked || !field.varietyId) continue;
+          const sourceVariety = this.getVariety(field.varietyId);
+          for (const slot of field.slots) {
+            if (!slot.active || slot.ripe) continue;
+            slot.timer -= dtSeconds;
+            if (slot.timer <= 0) {
+              slot.ripe = true;
+              changed = true;
+              // Day-3+ random Specimen appearance (see PROJECT.md section 4):
+              // rolled the instant this fruit becomes ripe, never later at
+              // harvest time, so save/reload can never reroll it.
+              if (sourceVariety) this.maybeGenerateRandomSpecimen(slot, sourceVariety);
+            }
           }
         }
       }
-    }
 
-    // ONE shared farm-wide Shipping/Processing Queue: only the head item
-    // (index 0) has an active timer — the rest simply wait their turn, so
-    // buying more Fields raises production but never speeds up this shared
-    // line. A `while` (not `if`) lets a single large dt — e.g. the debug
-    // speed multiplier — ship several ready apples in one tick, each still
-    // emitting its own 'shipment' event exactly as if shipped individually.
-    if (this.state.processingQueue.length > 0) {
-      this.state.processingTimer -= dtSeconds;
-      while (this.state.processingTimer <= 0 && this.state.processingQueue.length > 0) {
-        const item = this.state.processingQueue.shift()!;
-        // Cash/totalRevenue are always paid — this money was genuinely
-        // earned the instant the apple was harvested/priced, regardless of
-        // day state. dayHarvestRevenue/dayMarketBonus, however, exist only
-        // to feed the CURRENT day's settlement snapshot (finishClosing) and
-        // get reset to 0 on the next advanceDayInternal(); once the day is
-        // already settled (dayEnded) that snapshot has already been taken
-        // and shown, so continuing to add to them here would just leak
-        // revenue that never appears in any summary. During Closing itself
-        // dayEnded is still false (it only flips true once the queue is
-        // fully drained — see finishClosing below), so Final Shipment
-        // revenue is correctly still counted into the closing day's own
-        // summary, never the next day's.
-        this.state.cash += item.value;
-        this.state.totalRevenue += item.value;
-        if (!this.state.dayEnded) {
-          this.state.dayHarvestRevenue += item.baseValue;
-          this.state.dayMarketBonus += item.value - item.baseValue;
+      // ONE shared farm-wide Shipping/Processing Queue: only the head item
+      // (index 0) has an active timer — the rest simply wait their turn, so
+      // buying more Fields raises production but never speeds up this shared
+      // line. A `while` (not `if`) lets a single large dt — e.g. the debug
+      // speed multiplier — ship several ready apples in one tick, each still
+      // emitting its own 'shipment' event exactly as if shipped individually.
+      if (this.state.processingQueue.length > 0) {
+        this.state.processingTimer -= dtSeconds;
+        while (this.state.processingTimer <= 0 && this.state.processingQueue.length > 0) {
+          const item = this.state.processingQueue.shift()!;
+          // Cash/totalRevenue are always paid — this money was genuinely
+          // earned the instant the apple was harvested/priced, regardless of
+          // day state. dayHarvestRevenue/dayMarketBonus, however, exist only
+          // to feed the CURRENT day's settlement snapshot (finishClosing) and
+          // get reset to 0 on the next advanceDayInternal(); once the day is
+          // already settled (dayEnded) that snapshot has already been taken
+          // and shown, so continuing to add to them here would just leak
+          // revenue that never appears in any summary. During Closing itself
+          // dayEnded is still false (it only flips true once the queue is
+          // fully drained — see finishClosing below), so Final Shipment
+          // revenue is correctly still counted into the closing day's own
+          // summary, never the next day's.
+          this.state.cash += item.value;
+          this.state.totalRevenue += item.value;
+          if (!this.state.dayEnded) {
+            this.state.dayHarvestRevenue += item.baseValue;
+            this.state.dayMarketBonus += item.value - item.baseValue;
+          }
+          // Exact, unrounded value — the HUD feedback now displays money to
+          // two decimal places, so no rounding belongs here (see HUD.ts).
+          this.emit({ type: 'shipment', fieldId: item.fieldId, revenue: item.value });
+          changed = true;
+          this.state.processingTimer += this.processingCadenceSeconds();
         }
-        // Exact, unrounded value — the HUD feedback now displays money to
-        // two decimal places, so no rounding belongs here (see HUD.ts).
-        this.emit({ type: 'shipment', fieldId: item.fieldId, revenue: item.value });
-        changed = true;
-        this.state.processingTimer += this.processingCadenceSeconds();
+        if (this.state.processingQueue.length === 0) this.state.processingTimer = 0;
       }
-      if (this.state.processingQueue.length === 0) this.state.processingTimer = 0;
+
+      // Closing (state.closing) stays true until the accelerated Final
+      // Shipment drain above has fully emptied the shared queue — only then
+      // does settlement actually run, so Final Shipment revenue is always
+      // folded into the closing day's own summary (see finishClosing).
+      if (this.state.closing && this.state.processingQueue.length === 0) {
+        this.finishClosing();
+        changed = true;
+      }
     }
 
-    // Closing (state.closing) stays true until the accelerated Final
-    // Shipment drain above has fully emptied the shared queue — only then
-    // does settlement actually run, so Final Shipment revenue is always
-    // folded into the closing day's own summary (see finishClosing).
-    if (this.state.closing && this.state.processingQueue.length === 0) {
-      this.finishClosing();
-      changed = true;
-    }
-
+    // Breed progression is deliberately NOT gated by pauseFarmSimulation —
+    // only farm/day time freezes while the player is on the BREED screen,
+    // never the Breed operation itself (see PROJECT.md "Breed is a
+    // strategic pause").
     const breeding = this.state.breeding;
     if (breeding.active && !breeding.ready) {
       breeding.elapsed += dtSeconds;
@@ -293,14 +342,29 @@ export class Game {
 
   private resolveBreeding(): void {
     const breeding = this.state.breeding;
-    const parentA = this.getVariety(breeding.parentAId);
-    const parentB = this.getVariety(breeding.parentBId);
+    // A SPECIMEN parent was already consumed (removed from
+    // state.specimens) the instant BREED started, so its data is read from
+    // the snapshot taken at that moment — never looked up live here.
+    const parentA =
+      breeding.parentAKind === 'SPECIMEN'
+        ? breeding.parentASpecimenSnapshot && this.breedParentFromSpecimen(breeding.parentASpecimenSnapshot)
+        : this.getVariety(breeding.parentAId);
+    const parentB =
+      breeding.parentBKind === 'SPECIMEN'
+        ? breeding.parentBSpecimenSnapshot && this.breedParentFromSpecimen(breeding.parentBSpecimenSnapshot)
+        : this.getVariety(breeding.parentBId);
     if (!parentA || !parentB) return;
 
     const result = breedOffspring(parentA, parentB, breeding.dayStarted, this.state);
     breeding.offspring = result.offspring;
     breeding.ready = true;
     breeding.everBredOnce = true;
+    // Every one of the four candidates was rescaled to this exact shared
+    // TOTAL (see PROJECT.md section 2) — persisted here so the result UI
+    // can display "TOTAL x -> y" without re-deriving it (see
+    // BreedScreen.ts).
+    breeding.strongerParentTotal = result.strongerParentTotal;
+    breeding.breedTargetTotal = result.breedTargetTotal;
 
     if (breeding.dayStarted === 1) this.state.day1YellowGuaranteeUsed = true;
     if (breeding.dayStarted === 5) this.state.day5MutationGuaranteeUsed = true;
@@ -319,14 +383,7 @@ export class Game {
       }
     }
     for (const visualId of result.newlyDiscoveredVisualIds) {
-      if (!this.state.discoveredVisualIds.includes(visualId)) {
-        this.state.discoveredVisualIds.push(visualId);
-        // Every newly discovered Visual Variety automatically gains Market
-        // state, safely at baseline/STABLE — see initVisualMarketEntry's
-        // doc comment for why it deliberately gets no random move yet.
-        this.state.visualMarket[visualId] = initVisualMarketEntry(visualId, this.state.day);
-        discoveredSomething = true;
-      }
+      if (this.registerVisualDiscovery(visualId)) discoveredSomething = true;
     }
 
     if (discoveredSomething) this.state.hasUnseenDiscovery = true;
@@ -340,6 +397,127 @@ export class Game {
       this.state.hasUnseenDiscovery = false;
       this.notify();
     }
+  }
+
+  /**
+   * Registers a Visual Variety as DISCOVERED (see PROJECT.md section 7),
+   * safely at baseline/STABLE Market state with no random move on the
+   * discovery day — the single shared path both breeding discovery
+   * (resolveBreeding) and Orchard Specimen discovery
+   * (maybeGenerateRandomSpecimen/spawnGuaranteedSpecimen) go through.
+   * Returns whether it was actually newly discovered (false = already
+   * known, a safe no-op).
+   */
+  private registerVisualDiscovery(visualId: AppleAssetId): boolean {
+    if (this.state.discoveredVisualIds.includes(visualId)) return false;
+    this.state.discoveredVisualIds.push(visualId);
+    this.state.visualMarket[visualId] = initVisualMarketEntry(visualId, this.state.day);
+    return true;
+  }
+
+  // ----------------------------------------------------------------
+  // Orchard Mutation / Breeding Specimen
+  // ----------------------------------------------------------------
+
+  /**
+   * A Specimen's five stats mutated from `sourceVariety`'s own genetics
+   * (see systems/specimen.ts generateSpecimenStats) — never from the
+   * Visual's rarity. `baseVisualId` (see types.ts's BreedingSpecimen doc
+   * comment) is set once, here, and never re-derived later: a Common-tier
+   * specimen is its own stable base; a Rare/Epic-tier specimen inherits
+   * the planted source Line's OWN baseVisualId (never its visualId) — see
+   * PROJECT.md section 10.
+   */
+  private buildSpecimen(visualId: AppleAssetId, sourceVariety: Variety): BreedingSpecimen {
+    const baseVisualId = deriveSpecimenBaseVisualId(visualId, sourceVariety.baseVisualId);
+    const [sweetness, size, yieldStat, growth, freshness] = generateSpecimenStats(statsOf(sourceVariety));
+    return {
+      id: crypto.randomUUID(),
+      visualId,
+      baseVisualId,
+      sweetness: Math.round(sweetness),
+      size: Math.round(size),
+      yieldStat: Math.round(yieldStat),
+      growth: Math.round(growth),
+      freshness: Math.round(freshness),
+      foundDay: this.state.day,
+      sourceLineId: sourceVariety.id,
+      sourceGeneration: sourceVariety.generation,
+    };
+  }
+
+  /** Day-1/Day-2 guaranteed onboarding Specimen (see PROJECT.md section 3) — idempotent via the day1/day2SpecimenGuaranteeUsed flags, so this is always safe to call on every load/day-transition. */
+  private maybeSpawnGuaranteedSpecimen(): void {
+    if (this.state.day === 1 && !this.state.day1SpecimenGuaranteeUsed) {
+      this.spawnGuaranteedSpecimen('C2');
+      this.state.day1SpecimenGuaranteeUsed = true;
+    } else if (this.state.day === 2 && !this.state.day2SpecimenGuaranteeUsed) {
+      const visualId = chooseDay2GuaranteedVisual(this.state.discoveredVisualIds);
+      this.spawnGuaranteedSpecimen(visualId);
+      this.state.day2SpecimenGuaranteeUsed = true;
+    }
+  }
+
+  /** Forces one existing active fruit slot on a planted Field ripe immediately (the one tutorial exception — see PROJECT.md section 3) and attaches a freshly generated Specimen to it, no new productive-slot capacity added. */
+  private spawnGuaranteedSpecimen(visualId: AppleAssetId): void {
+    const fieldIndex = chooseGuaranteedSpecimenFieldIndex(this.state.fields, (varietyId) => this.getVariety(varietyId)?.baseVisualId, visualId);
+    if (fieldIndex < 0) return;
+    const field = this.state.fields[fieldIndex];
+    const sourceVariety = this.getVariety(field.varietyId);
+    if (!sourceVariety) return;
+    const activeIndex = field.slots.findIndex((s) => s.active);
+    if (activeIndex < 0) return;
+
+    const slot = field.slots[activeIndex];
+    slot.ripe = true;
+    slot.timer = 0;
+    slot.specimen = this.buildSpecimen(visualId, sourceVariety);
+    if (this.registerVisualDiscovery(visualId)) this.state.hasUnseenDiscovery = true;
+  }
+
+  /**
+   * Day-3+ per-ripened-fruit random Specimen roll (see PROJECT.md section
+   * 4) — called the instant an ordinary fruit slot becomes ripe. Folds in
+   * the planted Line's own Rare/Epic Mutation Affinity, if any (see
+   * systems/specimen.ts rollOrchardSpecimen). Safe no-op (ordinary fruit)
+   * if nothing fires or no valid alternate Visual exists.
+   */
+  private maybeGenerateRandomSpecimen(slot: FieldFruitSlot, sourceVariety: Variety): void {
+    const roll = rollOrchardSpecimen(this.state.day, sourceVariety.baseVisualId, sourceVariety.visualId, this.state.discoveredVisualIds);
+    if (!roll) return;
+    slot.specimen = this.buildSpecimen(roll.visualId, sourceVariety);
+    if (this.registerVisualDiscovery(roll.visualId)) this.state.hasUnseenDiscovery = true;
+  }
+
+  /** Builds a breeding-parent view of a held Specimen — color/pattern are borrowed from its source Line (a Specimen doesn't persist its own; see types.ts's BreedingSpecimen doc comment), falling back to a neutral default only if that Line is somehow gone. `baseVisualId` is already correct on the specimen itself (set once at creation — see buildSpecimen), so it's simply passed through. */
+  private breedParentFromSpecimen(specimen: BreedingSpecimen): BreedParent {
+    const sourceLine = this.getVariety(specimen.sourceLineId);
+    return {
+      visualId: specimen.visualId,
+      baseVisualId: specimen.baseVisualId,
+      color: sourceLine?.color ?? 'Red',
+      pattern: sourceLine?.pattern ?? 'Plain',
+      sweetness: specimen.sweetness,
+      size: specimen.size,
+      yieldStat: specimen.yieldStat,
+      growth: specimen.growth,
+      freshness: specimen.freshness,
+      generation: specimen.sourceGeneration,
+    };
+  }
+
+  private resolveBreedParentRef(ref: BreedParentRef): BreedParent | undefined {
+    if (ref.kind === 'LINE') return this.getVariety(ref.id);
+    const specimen = this.state.specimens.find((s) => s.id === ref.id);
+    return specimen ? this.breedParentFromSpecimen(specimen) : undefined;
+  }
+
+  /** Removes and returns the specimen with this id from the held inventory — the atomic consumption step (see startBreeding). Null if it's already gone (shouldn't normally happen; defensive against a stale ref). */
+  private consumeSpecimen(id: string): BreedingSpecimen | null {
+    const idx = this.state.specimens.findIndex((s) => s.id === id);
+    if (idx < 0) return null;
+    const [specimen] = this.state.specimens.splice(idx, 1);
+    return specimen;
   }
 
   // ----------------------------------------------------------------
@@ -367,15 +545,33 @@ export class Game {
     const variety = this.getVariety(field.varietyId);
     if (!variety) return;
 
+    // Captured before this slot's own specimen field is cleared below —
+    // this is the ONE path every harvest route (direct click/sweep,
+    // HARVEST ALL, Closing's automatic ripe-fruit collection) shares, so a
+    // Specimen is preserved into the inventory identically no matter which
+    // route reached it (see PROJECT.md section 8).
+    const specimen = slot.specimen;
+
     slot.ripe = false;
     slot.active = false;
     slot.timer = 0;
+    slot.specimen = null;
 
     const nextIndex = pickNextProductiveSlot(field.slots, slotIndex);
     const nextSlot = field.slots[nextIndex];
     nextSlot.active = true;
     nextSlot.ripe = false;
+    nextSlot.specimen = null;
     nextSlot.timer = fruitRegrowSeconds(variety.growth, this.state.irrigationLevel);
+
+    if (specimen) {
+      // Never sold, never shipped, never repriced/rerolled — the exact
+      // specimen generated when this fruit appeared is what's kept.
+      this.state.specimens.push(specimen);
+      this.emit({ type: 'specimenAcquired', specimen });
+      this.notify();
+      return;
+    }
 
     const { value, baseValue } = priceHarvestedApple(variety, field, this.state);
     this.state.processingQueue.push({ fieldId, value, baseValue });
@@ -477,24 +673,54 @@ export class Game {
     return this.state.breeding.everBredOnce ? TUNING.BREED_DURATION_SEC : TUNING.BREED_FIRST_DURATION_SEC;
   }
 
-  startBreeding(parentAId: string, parentBId: string): boolean {
+  /**
+   * Starts breeding from either a permanent Library Line or a held
+   * Breeding Specimen in each slot (see PROJECT.md section 9). The same
+   * Specimen id cannot occupy both slots; Line self-cross remains fully
+   * allowed. A Specimen parent is consumed here, atomically with starting
+   * breeding — not later on KEEP (see PROJECT.md section 10) — so its data
+   * is snapshotted into breeding.parentA/BSpecimenSnapshot for
+   * resolveBreeding to use once it can no longer be looked up live.
+   */
+  startBreeding(parentA: BreedParentRef, parentB: BreedParentRef): boolean {
     if (!this.canStartBreeding()) return false;
     const cost = this.breedingCost();
     if (this.state.cash < cost) return false;
-    if (!this.getVariety(parentAId) || !this.getVariety(parentBId)) return false;
+    if (parentA.kind === 'SPECIMEN' && parentB.kind === 'SPECIMEN' && parentA.id === parentB.id) return false;
+
+    const resolvedA = this.resolveBreedParentRef(parentA);
+    const resolvedB = this.resolveBreedParentRef(parentB);
+    if (!resolvedA || !resolvedB) return false;
 
     this.state.cash -= cost;
-    this.recordRecentParents(parentAId, parentBId);
+
+    const specimenSnapshotA = parentA.kind === 'SPECIMEN' ? this.consumeSpecimen(parentA.id) : null;
+    const specimenSnapshotB = parentB.kind === 'SPECIMEN' ? this.consumeSpecimen(parentB.id) : null;
+
+    // recentParentIds tracks permanent Lines only (see types.ts doc
+    // comment) — recordRecentParents already collapses a repeated id into
+    // one entry, which is exactly the behavior wanted when only one side is
+    // a Line.
+    if (parentA.kind === 'LINE' && parentB.kind === 'LINE') this.recordRecentParents(parentA.id, parentB.id);
+    else if (parentA.kind === 'LINE') this.recordRecentParents(parentA.id, parentA.id);
+    else if (parentB.kind === 'LINE') this.recordRecentParents(parentB.id, parentB.id);
+
     this.state.breeding = {
       active: true,
-      parentAId,
-      parentBId,
+      parentAId: parentA.id,
+      parentAKind: parentA.kind,
+      parentASpecimenSnapshot: specimenSnapshotA,
+      parentBId: parentB.id,
+      parentBKind: parentB.kind,
+      parentBSpecimenSnapshot: specimenSnapshotB,
       elapsed: 0,
       duration: this.breedingDuration(),
       dayStarted: this.state.day,
       ready: false,
       offspring: null,
       everBredOnce: this.state.breeding.everBredOnce,
+      strongerParentTotal: null,
+      breedTargetTotal: null,
     };
     this.notify();
     return true;
@@ -534,6 +760,7 @@ export class Game {
       color: chosen.color,
       pattern: chosen.pattern,
       visualId: chosen.visualId,
+      baseVisualId: chosen.baseVisualId,
       sweetness: chosen.sweetness,
       size: chosen.size,
       yieldStat: chosen.yieldStat,
@@ -551,13 +778,19 @@ export class Game {
     this.state.breeding = {
       active: false,
       parentAId: null,
+      parentAKind: 'LINE',
+      parentASpecimenSnapshot: null,
       parentBId: null,
+      parentBKind: 'LINE',
+      parentBSpecimenSnapshot: null,
       elapsed: 0,
       duration: 0,
       dayStarted: this.state.day,
       ready: false,
       offspring: null,
       everBredOnce: true,
+      strongerParentTotal: null,
+      breedTargetTotal: null,
     };
     this.notify();
     return variety;
@@ -796,6 +1029,10 @@ export class Game {
     this.state.dayHarvestRevenue = 0;
     this.state.dayMarketBonus = 0;
     this.state.dayContestPrize = 0;
+    // Handles the Day 1->2 transition spawning the Day-2 guarantee
+    // immediately (rather than only on the next reload) — safe/idempotent
+    // on every other day transition since it's gated on day===1/day===2.
+    this.maybeSpawnGuaranteedSpecimen();
     this.notify();
   }
 }

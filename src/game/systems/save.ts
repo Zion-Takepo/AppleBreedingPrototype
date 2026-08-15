@@ -1,5 +1,6 @@
 import { TUNING } from '../tuning.ts';
-import type { DayLogEntry, GameState, Variety } from '../types.ts';
+import type { BreedingSpecimen, DayLogEntry, GameState, Variety } from '../types.ts';
+import { APPLE_RARITY } from '../render/appleAssets.ts';
 import { activeSlotIndices, allSlotsActive, makeInitialFruitSlots } from './economy.ts';
 import { initVisualMarketEntry } from './market.ts';
 import { freshStarterLines, STARTER_GREEN } from './starterLines.ts';
@@ -34,6 +35,35 @@ function backfillLineFields(variety: Partial<Variety> & { name?: string }): void
   if (typeof variety.archived !== 'boolean') variety.archived = false;
 }
 
+// Saves from before the "Revise Rare / Epic Line behavior" pass have no
+// `baseVisualId` at all. A Common Line's is always its own visualId — that
+// part is always exactly recoverable. A Rare/Epic Line's true historical
+// baseVisualId depends on parent lineage this codebase has never tracked
+// on a Variety (Lines don't record parentIds), so there's no real
+// provenance to recover for THOSE specifically — falling back to its own
+// visualId is the same "safe fallback over fabrication" the rest of this
+// file already uses (e.g. the very old visualId backfill below), not a
+// perfect reconstruction, but never a crash and never invented data.
+function backfillLineBaseVisual(variety: Partial<Variety>): void {
+  if (typeof variety.baseVisualId !== 'string' && variety.visualId) {
+    variety.baseVisualId = variety.visualId;
+  }
+}
+
+// Specimens DO record `sourceLineId`, so — unlike Lines — a Rare/Epic
+// Specimen's baseVisualId can actually be recovered from its still-present
+// source Line (already migrated by the time this runs; see migrateState's
+// ordering) rather than merely falling back to its own visualId.
+function backfillSpecimenBaseVisual(specimen: Partial<BreedingSpecimen> | null | undefined, library: Variety[]): void {
+  if (!specimen || typeof specimen.baseVisualId === 'string' || !specimen.visualId) return;
+  if (APPLE_RARITY[specimen.visualId] === 'COMMON') {
+    specimen.baseVisualId = specimen.visualId;
+    return;
+  }
+  const sourceLine = library.find((v) => v.id === specimen.sourceLineId);
+  specimen.baseVisualId = sourceLine?.baseVisualId ?? specimen.visualId;
+}
+
 function migrateState(state: GameState): void {
   if (!state.discoveredVisualIds) state.discoveredVisualIds = ['C1', 'C2'];
 
@@ -61,6 +91,27 @@ function migrateState(state: GameState): void {
     state.library = freshStarterLines();
   }
   if (!Array.isArray(state.recentParentIds)) state.recentParentIds = [];
+
+  // Saves from before the Orchard Mutation / Breeding Specimen pass have no
+  // specimen inventory or guarantee bookkeeping at all. Per PROJECT.md
+  // section 16, a save still on Day 1 or Day 2 is allowed to receive that
+  // day's still-applicable guarantee once (handled by
+  // Game.maybeSpawnGuaranteedSpecimen, gated on these same flags — never
+  // here) — a Day 3+ save simply never gets a Day-1/Day-2 specimen
+  // retroactively, which falling through to `false` here already ensures.
+  if (!Array.isArray(state.specimens)) state.specimens = [];
+  if (typeof state.day1SpecimenGuaranteeUsed !== 'boolean') state.day1SpecimenGuaranteeUsed = false;
+  if (typeof state.day2SpecimenGuaranteeUsed !== 'boolean') state.day2SpecimenGuaranteeUsed = false;
+  if (state.breeding) {
+    const breeding = state.breeding as GameState['breeding'] & { parentAKind?: unknown; parentBKind?: unknown };
+    if (breeding.parentAKind !== 'LINE' && breeding.parentAKind !== 'SPECIMEN') state.breeding.parentAKind = 'LINE';
+    if (breeding.parentBKind !== 'LINE' && breeding.parentBKind !== 'SPECIMEN') state.breeding.parentBKind = 'LINE';
+    if (state.breeding.parentASpecimenSnapshot === undefined) state.breeding.parentASpecimenSnapshot = null;
+    if (state.breeding.parentBSpecimenSnapshot === undefined) state.breeding.parentBSpecimenSnapshot = null;
+    // Saves from before the Breed TOTAL-progression pass have neither field.
+    if (typeof state.breeding.strongerParentTotal !== 'number') state.breeding.strongerParentTotal = null;
+    if (typeof state.breeding.breedTargetTotal !== 'number') state.breeding.breedTargetTotal = null;
+  }
 
   // Saves from before the global Shipping Pipeline pass have no farm-wide
   // processing queue at all (they used a since-removed per-field
@@ -105,6 +156,7 @@ function migrateState(state: GameState): void {
     if (!variety.visualId) variety.visualId = variety.id === STARTER_GREEN.id ? STARTER_GREEN.visualId : 'C1';
     backfillTraits(variety);
     backfillLineFields(variety);
+    backfillLineBaseVisual(variety);
   }
   if (state.breeding?.offspring) {
     for (const offspring of state.breeding.offspring) {
@@ -112,7 +164,21 @@ function migrateState(state: GameState): void {
       if (offspring.isNewVisualId === undefined) offspring.isNewVisualId = false;
       backfillTraits(offspring);
       backfillLineFields(offspring);
+      backfillLineBaseVisual(offspring);
     }
+  }
+
+  // Specimen baseVisualId backfill — deliberately AFTER the library loop
+  // above, since Rare/Epic specimens recover their baseVisualId from their
+  // (by-then-already-migrated) source Line where possible. Covers every
+  // place a Specimen can persist: the held inventory, an in-flight
+  // breeding snapshot, and one still sitting unharvested on a fruit slot
+  // (the latter is backfilled below, alongside this pass's other per-slot
+  // migration work).
+  for (const specimen of state.specimens) backfillSpecimenBaseVisual(specimen, state.library);
+  if (state.breeding) {
+    backfillSpecimenBaseVisual(state.breeding.parentASpecimenSnapshot, state.library);
+    backfillSpecimenBaseVisual(state.breeding.parentBSpecimenSnapshot, state.library);
   }
 
   // Saves written before the continuous-orchard pass have a single
@@ -130,14 +196,26 @@ function migrateState(state: GameState): void {
     if (!Array.isArray(field.slots)) {
       const fractionGrown = legacy.ready ? 1 : (legacy.growth ?? 0);
       field.slots = makeInitialFruitSlots(fractionGrown, variety?.growth ?? 50, state.irrigationLevel ?? 0, active ?? allSlotsActive());
-    } else if (active) {
-      for (let i = 0; i < field.slots.length; i++) {
-        const slot = field.slots[i];
-        if (typeof slot.active !== 'boolean') slot.active = active.has(i);
-        if (!slot.active) {
-          slot.ripe = false;
-          slot.timer = 0;
+    } else {
+      if (active) {
+        for (let i = 0; i < field.slots.length; i++) {
+          const slot = field.slots[i];
+          if (typeof slot.active !== 'boolean') slot.active = active.has(i);
+          if (!slot.active) {
+            slot.ripe = false;
+            slot.timer = 0;
+          }
         }
+      }
+      // Saves from before the Specimen pass have no per-slot `specimen`
+      // field at all — backfill null (never fabricate a historical
+      // specimen) regardless of whether `active` could be computed above.
+      // A specimen that DOES already exist here (an unharvested special
+      // fruit) gets its own baseVisualId backfilled too, same as any other
+      // Specimen.
+      for (const slot of field.slots) {
+        if (typeof slot.specimen === 'undefined') slot.specimen = null;
+        else backfillSpecimenBaseVisual(slot.specimen, state.library);
       }
     }
     // The old per-field batch-deferral rule (pendingPolicy waiting for a

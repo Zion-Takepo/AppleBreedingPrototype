@@ -11,7 +11,7 @@ import { ToastQueue } from '../ui/modals.ts';
 import { showEndDaySummary } from '../ui/EndDayModal.ts';
 import { showWeekSummary } from '../ui/WeekSummaryModal.ts';
 import { DebugPanel } from '../ui/DebugPanel.ts';
-import { APPLE_ASSET_IDS, appleAssetPath, appleTextureKey } from '../render/appleAssets.ts';
+import { APPLE_ASSET_IDS, appleAssetPath, appleTextureKey, catalogLabel } from '../render/appleAssets.ts';
 import type { DayLogEntry } from '../types.ts';
 
 const REFRESH_INTERVAL_MS = 120;
@@ -80,6 +80,9 @@ export class MainScene extends Phaser.Scene {
       }
       if (event.type === 'traitDiscovered' && this.activeScreen !== 'COLLECTION') {
         this.toasts.show('New trait discovered!', THEME.gold);
+      }
+      if (event.type === 'specimenAcquired') {
+        this.toasts.show(`SPECIMEN ACQUIRED — ${catalogLabel(event.specimen.visualId)}`, THEME.gold);
       }
       // Closing (automatic 18:00 or manual END DAY — see Game.beginClosing)
       // finishes asynchronously once the accelerated Final Shipment queue
@@ -196,12 +199,43 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
+  // Strategic pause (see PROJECT.md "Breed is a strategic pause"): every
+  // sub-state reachable while BREED is the active main screen (parent
+  // selection, LINES/SPECIMENS picker, Line/Specimen detail, the 5-stat
+  // help modal, offspring comparison, KEEP/post-Breed UI) is rendered
+  // either directly inside BreedScreen's own content or as a modal that
+  // blocks input to the rest of the scene while open — so gating purely on
+  // "is BREED the active screen" already covers every one of those nested
+  // states with no extra tracking needed. Deliberately NOT gated while
+  // Closing is already in progress or the day has already ended — merely
+  // being on the BREED tab must never suspend an already-started
+  // settlement flow (see beginClosing/finishClosing). No pause flag is
+  // persisted: this is purely derived, each frame, from existing
+  // (already-transient) navigation/day state, per PROJECT.md's explicit
+  // "don't persist a pause flag unless genuinely required" guidance.
+  //
+  // This only pauses the farm/day SIMULATION (day clock, fruit growth,
+  // shipping queue, Closing-by-time) — it must NOT stop an in-progress
+  // Breed operation's own countdown, which needs to keep advancing (and
+  // resolve) even while the player stays on the BREED screen the whole
+  // time. Game.update()'s `pauseFarmSimulation` parameter enforces that
+  // split internally, so this method is always called every frame
+  // regardless of the pause state — only farm/day progression inside it is
+  // conditionally skipped.
+  private isBreedPauseActive(): boolean {
+    return this.activeScreen === 'BREED' && !this.logic.state.closing && !this.logic.state.dayEnded;
+  }
+
   update(_time: number, deltaMs: number): void {
     const dt = (deltaMs / 1000) * this.speedMult;
-    this.logic.update(dt);
-    // Every real frame (not throttled to REFRESH_INTERVAL_MS) so fruit
-    // reveal/sway tweens stay smooth.
-    this.orchard.updateTrees(dt);
+    const farmPaused = this.isBreedPauseActive();
+    this.logic.update(dt, farmPaused);
+    if (!farmPaused) {
+      // Every real frame (not throttled to REFRESH_INTERVAL_MS) so fruit
+      // reveal/sway tweens stay smooth. Orchard isn't even visible while
+      // BREED is active, so skipping this during the pause is harmless.
+      this.orchard.updateTrees(dt);
+    }
 
     this.refreshAccum += deltaMs;
     if (this.refreshAccum >= REFRESH_INTERVAL_MS) {
