@@ -64,8 +64,18 @@ export const TUNING = {
   SHIPPING_BONUS_PER_LEVEL: 0.1,
   SHIPPING_MAX_LEVEL: 2,
 
-  DAILY_EXPENSE_BASE: 15,
-  DAILY_EXPENSE_PER_FIELD: 20,
+  // Daily Operating Cost (see systems/economy.ts operatingCost) — ONE
+  // number per day, settled once during Closing after Final Shipment
+  // finishes (see Game.finishClosing). Replaces the old flat
+  // DAILY_EXPENSE_BASE/PER_FIELD bridge rather than stacking a second
+  // expense on top of it; BASE/PER_FIELD keep their old values so Day 1 on
+  // the starting 1-Field farm costs exactly what it always has ($35), with
+  // OPERATING_COST_PER_DAY adding a small, purely linear day-over-day
+  // progression term so pure time passage stays gentle (Day 7 on the same
+  // 1-Field farm: $35 -> $53).
+  OPERATING_COST_BASE: 15,
+  OPERATING_COST_PER_FIELD: 20,
+  OPERATING_COST_PER_DAY: 3,
 
   // Cultivation only ever adjusts *effective* Sweetness/Size used for
   // price/contests — it never touches genetic stats, and (since this pass)

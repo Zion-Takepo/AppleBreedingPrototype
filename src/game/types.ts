@@ -117,7 +117,10 @@ export interface DayLogEntry {
   harvestRevenue: number;
   marketBonus: number;
   contestPrize: number;
-  expenses: number;
+  // The day's single Operating Cost figure (see systems/economy.ts
+  // operatingCost) — gross day revenue (harvestRevenue + marketBonus +
+  // contestPrize) minus this equals `net`.
+  operatingCost: number;
   net: number;
 }
 

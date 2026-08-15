@@ -348,7 +348,8 @@ strong Common can outsell a weak Epic. Yield's production advantage is
 active-slot count instead (more apples produced over time, not a
 higher-value one).
 
-Daily expenses at END DAY: `$15 + $20 per owned Field`.
+Daily Operating Cost is deducted once per day during Closing — see Daily
+Operating Cost below for the exact formula.
 
 Cultivation modifiers (SWEETEN/GROW_BIG) only affect *effective*
 Sweetness/Size used for harvest value and contest scoring — genetic stats
@@ -376,26 +377,29 @@ active-slot count or harvest quantity.
 | 6 | Purple +40%, Striped +25% market event |
 | 7 | **Apple Fair** — composite score (sweetness/size/rarity); benchmarks 35/50/65 → $90/$200/$400, then Week 1 Complete summary |
 
-One game Day ≈ 90 seconds of active time. At 0, growth cycles already in
-progress finish naturally but no *new* cycle starts, and no new breeding can
-begin; ready harvests/offspring can still be collected/resolved, and END DAY
-becomes available.
+One game Day runs on the `TUNING.DAY_DURATION_SEC` (90s) pacing shown as the
+09:00-18:00 clock (see Day Cycle below); reaching 18:00 or clicking END DAY
+early both trigger the same Closing procedure.
 
-END DAY sets `GameState.dayEnded=true` and shows a summary modal; only
-that modal's own "NEXT DAY →" button calls `proceedToNextDay()`, which
-resets `dayEnded` and advances the day (or, on Day 7, sets `weekComplete`
-and waits for the Week Summary modal's own continue button before actually
-advancing — `weekComplete` stays true and `dayEnded` stays true across that
-gap too). Both `dayEnded` and `weekComplete` are persisted GameState, but
-the summary modals that gate proceeding past them are transient UI only
-ever triggered by the END DAY click handler — a reload landing between
-"day ended" and "modal button clicked" used to leave the player stuck with
-a permanently-disabled END DAY button and no code path that could ever
-show the modal again. `MainScene.create()` now checks for this on load and
-re-enters the same flow (reusing the persisted `lastDayLog`) so the modal
-always reappears and the game is never trapped. `Game.endDay()` itself
-already no-ops on a second call (`canEndDay()` requires `!dayEnded`), so
-double-clicking END DAY was never able to double-charge expenses.
+Closing (`Game.beginClosing()`/`finishClosing()` — see Day Cycle below) ends
+with `GameState.dayEnded=true` and a summary modal shown from the
+`'dayClosed'` event; only that modal's own "NEXT DAY →" button calls
+`proceedToNextDay()`, which resets `dayEnded` and advances the day (or, on
+Day 7, sets `weekComplete` and waits for the Week Summary modal's own
+continue button before actually advancing — `weekComplete` stays true and
+`dayEnded` stays true across that gap too). Both `dayEnded` and
+`weekComplete` are persisted GameState, but the summary modals that gate
+proceeding past them are transient UI only ever triggered by Closing
+finishing — a reload landing between "day ended" and "modal button clicked"
+used to leave the player stuck with a permanently-disabled END DAY button
+and no code path that could ever show the modal again. `MainScene.create()`
+now checks for this on load and re-enters the same flow (reusing the
+persisted `lastDayLog`) so the modal always reappears and the game is never
+trapped. `beginClosing()` itself already no-ops on a second call
+(`this.state.closing || this.state.dayEnded` guard), so repeated END
+DAY/Closing calls were never able to double-charge Operating Cost or
+double-pay Final Shipment revenue (see Day Cycle and Daily Operating Cost
+below).
 
 ## Day Cycle
 
@@ -433,15 +437,17 @@ normal `PROCESSING_SECONDS_PER_APPLE` 1.0s/apple — roughly 8x faster, tuned
 so a typical remaining queue finishes in a couple of seconds) — still the
 one shared queue, never a second one, never a pricing change. Once the
 queue is fully empty, `update()` calls the private `finishClosing()`, which
-runs the existing daily-expense/day-log settlement math and only then sets
-`dayEnded = true` (`closing` back to `false`) and emits a `'dayClosed'`
-event. This ordering — Closing begins → ripe fruit collected → Final
-Shipment queue finishes → day accounting finalizes → `dayEnded` becomes the
-completed closed-day state — is what keeps Final Shipment revenue
-attributed to the closing day: the existing `dayHarvestRevenue`/
-`dayMarketBonus` guard in `update()` only stops accumulating once `dayEnded`
-is actually true, which by construction doesn't happen until after the
-queue is empty, so nothing can leak into the next day's summary.
+deducts Daily Operating Cost (see below), runs the day-log settlement math,
+and only then sets `dayEnded = true` (`closing` back to `false`) and emits
+a `'dayClosed'` event. This ordering — Closing begins → ripe fruit collected
+→ Final Shipment queue finishes → Operating Cost deducted → day accounting
+finalizes → `dayEnded` becomes the completed closed-day state — is what
+keeps Final Shipment revenue attributed to the closing day: the existing
+`dayHarvestRevenue`/`dayMarketBonus` guard in `update()` only stops
+accumulating once `dayEnded` is actually true, which by construction
+doesn't happen until after the queue is empty, so nothing can leak into the
+next day's summary — and, by the same construction, Operating Cost can only
+ever be deducted once, strictly after Final Shipment has fully paid out.
 
 `MainScene` no longer gets a synchronous log back from ending the day —
 `onEndDay()` just calls `beginClosing()`; the END DAY summary modal is
@@ -462,9 +468,78 @@ resets `closing = false` too, defensively, alongside the existing
 `dayEnded = false` reset).
 
 Not yet implemented (still future work, see Planned direction below):
-Daily Operating Cost, the Orchard/global HUD redesign (including the
-approved DAY/TIME → MARKET → NEXT CONTEST → MONEY → END DAY ordering),
-morning fades/rooster audio/page-flip transitions, and Freshness.
+Market V1, the Orchard/global HUD redesign (including the approved
+DAY/TIME → MARKET → NEXT CONTEST → MONEY → END DAY ordering), morning
+fades/rooster audio/page-flip transitions, and Freshness.
+
+## Daily Operating Cost
+
+ONE Operating Cost number is deducted once per day — never split into
+itemized categories (fertilizer/labor/electricity/etc.). It's computed and
+charged inside `Game.finishClosing()` (see Day Cycle above), which by
+construction only ever runs once per day, strictly after Final Shipment has
+fully drained the Processing Queue — so Operating Cost can never double- or
+early-charge, and Final Shipment revenue is always in `cash` before
+Operating Cost comes out of it.
+
+`systems/economy.ts` `operatingCost(day, fieldCount)` replaces the old flat
+`dailyExpenses()` bridge (rather than stacking a second expense on top of
+it) with one small linear formula, two additive components:
+
+```
+operatingCost = OPERATING_COST_BASE
+              + fieldCount * OPERATING_COST_PER_FIELD
+              + OPERATING_COST_PER_DAY * max(0, day - 1)
+```
+
+`OPERATING_COST_BASE` (15) and `OPERATING_COST_PER_FIELD` (20) keep the old
+bridge's exact values, so a Day 1, 1-Field farm still costs exactly $35 —
+no sudden balance shock from this pass. `OPERATING_COST_PER_DAY` (3) is the
+new gentle day-over-day progression term (`day` is 1-based, so Day 1 itself
+adds none of it) — pure linear growth, never compounding, so later days
+rise slowly enough for breeding/productivity improvements to realistically
+keep ahead of it (Day 7 on the same 1-Field farm: $53; add all 3 extra
+Fields on Day 7 and it's $113 — an obvious but not extreme jump from
+Fields, unchanged in kind from the old per-Field term).
+
+`DayLogEntry.operatingCost` (renamed from the old `expenses` field — old
+saves' persisted `lastDayLog.expenses` migrate to `operatingCost` in
+`systems/save.ts`) keeps the existing day-log accounting shape: gross day
+revenue is still `harvestRevenue + marketBonus + contestPrize`, `net =
+gross - operatingCost`. Money is displayed as `$X.XX` everywhere (HUD,
+shipment feedback, and now the END DAY summary too — its rows previously
+rounded to whole dollars, discarding real cents), so `finishClosing()`
+rounds `harvestRevenue`/`marketBonus` to the nearest **cent** rather than
+the nearest whole dollar (same "round the combined total once, derive one
+component as the remainder" trick as before, just at cents precision).
+
+`cash` itself keeps accumulating each apple's exact, unrounded fractional
+value in real time all day (see Shipping Pipeline above) — that per-apple
+precision is deliberately untouched. At the settlement boundary,
+`finishClosing()` reconciles `cash` against the exact same rounded
+`harvestRevenue`/`marketBonus`/`contestPrize`/`operatingCost` figures the
+summary displays (`nonRevenueCash = round_cents(cash - dayShipmentRevenue -
+contestPrize)`, then `cash = nonRevenueCash + net`) — not by independently
+re-rounding `cash`'s own running total. Two independently-rounded numbers
+that are mathematically supposed to agree can still land a cent apart on
+adversarial fractional inputs (floating-point addition isn't associative),
+so deriving both the displayed Net *and* the actual `cash` change from the
+identical rounded figures is what guarantees `displayed cash before +
+displayed Net == displayed cash after`, to the cent, by construction — not
+merely "usually." Only revenue (`dayHarvestRevenue`/`dayMarketBonus`/
+`dayContestPrize`) is reconciled this way; anything else that moved `cash`
+that day (Field/Irrigation/Shipping purchases, breeding costs — always
+exact whole-dollar amounts already) is left completely untouched, so this
+never conflates spending with revenue. This is also why `cash` ends up an
+exact multiple of $0.01 after every settlement, forever, by induction — no
+new persisted state or integer-cents rewrite needed for it.
+
+`GameState.totalRevenue` keeps its existing gross-lifetime-sales-revenue
+meaning; Operating Cost is never subtracted from it (only from `cash` and
+the per-day `net`), so the Week Summary's "Total Revenue" stat is
+unaffected by this pass. The END DAY summary modal's former "Expenses" row
+is now labeled "Operating Cost", and every row uses the same `formatMoney`
+(`$X.XX`) formatting as the rest of the money UI — no other UI changed.
 
 ## Persistence
 
@@ -525,6 +600,19 @@ this is built yet — recorded here so intent survives until each piece is
 actually implemented. Update each subsection into the relevant section above
 (and remove it from here) once it ships.
 
+### Market V1
+
+Every DISCOVERED Visual Variety (not individual Lines — see Visual Rarity
+above) gets one market-price update per game day; price is per Visual
+Variety, never per individual owned Line. The Market screen presents
+discovered varieties like a weather-report overview: image / catalog
+identity / today's +/- change / trend, keeping roughly 5 days of compact
+price history. RISING / STABLE / FALLING trends have real predictive
+influence on the next daily move, but never guarantee it; prices have
+long-term pull back toward baseline, and Calendar events (see Calendar
+above) can create larger temporary moves. UNDISCOVERED varieties remain
+hidden/unknown.
+
 ### Orchard / global UI redesign
 
 Direction: warm painterly orchard look — cream rounded cards, dark green top
@@ -551,36 +639,22 @@ shipping/basket status + processing status portion of the lower-right card
 already has a real implementation to surface (see Shipping Pipeline above)
 once this redesign happens — it isn't placeholder-only anymore.
 
-### Daily Operating Cost
-
-Replaces today's flat `$15 + $20/field` daily expense (see Economy above)
-with a single, simple **Operating Cost** value: deducted once per day, rises
-gradually with progression, and increases as the operation expands (more
-Fields → higher cost). Keep V1 to this one number — do not split it into
-multiple expense categories.
-
-### Market V1
-
-Every DISCOVERED Visual Variety (not individual Lines — see Visual Rarity
-above) gets one market-price update per game day; price is per Visual
-Variety, never per individual owned Line. The Market screen presents
-discovered varieties like a weather-report overview: image / catalog
-identity / today's +/- change / trend, keeping roughly 5 days of compact
-price history. RISING / STABLE / FALLING trends have real predictive
-influence on the next daily move, but never guarantee it; prices have
-long-term pull back toward baseline, and Calendar events (see Calendar
-above) can create larger temporary moves. UNDISCOVERED varieties remain
-hidden/unknown.
-
 ### Revised priority order
 
-Shipping Pipeline and Day Cycle are done (see their sections above) —
-remaining order:
+Shipping Pipeline, Day Cycle, and Daily Operating Cost are done (see their
+sections above) — remaining order:
 
-1. Daily Operating Cost
+1. Market V1
 2. Orchard / global UI redesign
-3. Market V1
-4. Freshness integration
-5. Collection / Library / Replant cleanup
-6. Orchard mutation-fruit discoveries
-7. Final art / animation / sound / font polish
+3. Freshness integration
+4. Collection / Library / Replant cleanup
+5. Orchard mutation-fruit discoveries
+6. Final art / animation / sound / font polish
+
+Market moved ahead of the UI redesign: the prototype already has a
+reasonably engaging core loop, and the next important open question is
+whether each new day creates a genuinely different decision. Operating Cost
+now adds economic pressure; Market V1 is what turns that into real
+day-to-day decision-making (when to sell, what to grow). The full visual
+redesign should follow once that real data/systems layer exists, not
+precede it.

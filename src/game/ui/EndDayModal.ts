@@ -1,7 +1,7 @@
 import type Phaser from 'phaser';
 import type { DayLogEntry } from '../types.ts';
 import { THEME } from './theme.ts';
-import { Button, text as mkText } from './uiKit.ts';
+import { Button, formatMoney, text as mkText } from './uiKit.ts';
 import { createModal } from './modals.ts';
 
 export function showEndDaySummary(scene: Phaser.Scene, log: DayLogEntry, isLastDay: boolean, onContinue: () => void): void {
@@ -14,7 +14,7 @@ export function showEndDaySummary(scene: Phaser.Scene, log: DayLogEntry, isLastD
     ['Harvest Revenue', log.harvestRevenue],
     ['Market Bonus', log.marketBonus],
     ['Contest Prize', log.contestPrize],
-    ['Expenses', -log.expenses],
+    ['Operating Cost', -log.operatingCost],
   ];
 
   let ry = modal.y + 120;
@@ -22,7 +22,7 @@ export function showEndDaySummary(scene: Phaser.Scene, log: DayLogEntry, isLastD
     const v = val ?? 0;
     const sign = v >= 0 ? '+' : '-';
     modal.root.add(mkText(scene, modal.x + 60, ry, label, 24, THEME.textMid));
-    modal.root.add(mkText(scene, modal.x + modal.w - 60, ry, `${sign}$${Math.abs(v)}`, 24, THEME.textDark, true, true).setOrigin(1, 0));
+    modal.root.add(mkText(scene, modal.x + modal.w - 60, ry, `${sign}$${formatMoney(Math.abs(v))}`, 24, THEME.textDark, true, true).setOrigin(1, 0));
     ry += 48;
   });
 
@@ -35,7 +35,7 @@ export function showEndDaySummary(scene: Phaser.Scene, log: DayLogEntry, isLastD
   const netY = lineY + 28;
   const netColor = log.net >= 0 ? '#2f5a20' : '#b23b3b';
   modal.root.add(mkText(scene, modal.x + 60, netY, 'NET', 28, THEME.textDark, true));
-  modal.root.add(mkText(scene, modal.x + modal.w - 60, netY, `${log.net >= 0 ? '+' : '-'}$${Math.abs(log.net)}`, 28, netColor, true, true).setOrigin(1, 0));
+  modal.root.add(mkText(scene, modal.x + modal.w - 60, netY, `${log.net >= 0 ? '+' : '-'}$${formatMoney(Math.abs(log.net))}`, 28, netColor, true, true).setOrigin(1, 0));
 
   const btn = new Button(scene, cx, modal.y + modal.h - 64, 400, 68, isLastDay ? 'CONTINUE →' : 'NEXT DAY →', () => {
     modal.close();

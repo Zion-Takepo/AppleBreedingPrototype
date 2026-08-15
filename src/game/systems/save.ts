@@ -1,5 +1,5 @@
 import { TUNING } from '../tuning.ts';
-import type { GameState, Variety } from '../types.ts';
+import type { DayLogEntry, GameState, Variety } from '../types.ts';
 import { activeSlotIndices, allSlotsActive, makeInitialFruitSlots } from './economy.ts';
 import { freshStarterLines, STARTER_GREEN } from './starterLines.ts';
 
@@ -60,6 +60,21 @@ function migrateState(state: GameState): void {
   // once it's empty, exactly as it would have without the reload — no
   // duplicate collection/payout and no permanent Closing stall.
   if (typeof state.closing !== 'boolean') state.closing = false;
+
+  // Saves from before the Operating Cost pass persisted the settled day's
+  // expense figure under `lastDayLog.expenses`; the field was renamed to
+  // `operatingCost` (same value, no formula change to the already-settled
+  // number) when the flat dailyExpenses() bridge was replaced. A reload
+  // landing between Closing finishing and the summary modal being clicked
+  // through re-displays this exact persisted object (see MainScene.create())
+  // without recomputing it, so remap the old key rather than showing a
+  // corrupted/undefined Operating Cost row.
+  if (state.lastDayLog) {
+    const legacyLog = state.lastDayLog as DayLogEntry & { expenses?: number };
+    if (typeof legacyLog.operatingCost !== 'number' && typeof legacyLog.expenses === 'number') {
+      legacyLog.operatingCost = legacyLog.expenses;
+    }
+  }
 
   // Root-cause fix for GREEN BASIC visually showing the red C1 apple: this
   // fallback used to blindly assign 'C1' to *any* Line missing a visualId

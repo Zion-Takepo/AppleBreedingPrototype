@@ -232,8 +232,18 @@ export function makeInitialFruitSlots(
   return slots;
 }
 
-export function dailyExpenses(fieldCount: number): number {
-  return TUNING.DAILY_EXPENSE_BASE + fieldCount * TUNING.DAILY_EXPENSE_PER_FIELD;
+/**
+ * The ONE Daily Operating Cost number, settled once per day during Closing
+ * (see Game.finishClosing) — deliberately a single small, transparent linear
+ * formula, never split into itemized expense categories. Two additive
+ * components: a per-Field term (owning more Fields raises the cost of
+ * running the farm) and a gentle per-day progression term (`day` is
+ * 1-based, so Day 1 has zero progression bonus) that rises with time
+ * without ever compounding/accelerating.
+ */
+export function operatingCost(day: number, fieldCount: number): number {
+  const progression = TUNING.OPERATING_COST_PER_DAY * Math.max(0, day - 1);
+  return TUNING.OPERATING_COST_BASE + fieldCount * TUNING.OPERATING_COST_PER_FIELD + progression;
 }
 
 const RARITY_POINTS: Record<string, number> = {

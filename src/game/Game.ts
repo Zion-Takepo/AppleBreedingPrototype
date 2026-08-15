@@ -11,10 +11,10 @@ import { breedOffspring } from './systems/breeding.ts';
 import {
   activeSlotIndices,
   allSlotsActive,
-  dailyExpenses,
   fairCompositeScore,
   fruitRegrowSeconds,
   makeInitialFruitSlots,
+  operatingCost,
   pickNextProductiveSlot,
   priceHarvestedApple,
   sweetnessContestScore,
@@ -693,36 +693,64 @@ export class Game {
    * Runs once the Processing Queue has fully drained after beginClosing()
    * (called only from update() — see the `state.closing` check there),
    * completing the settlement ordering: Closing begins -> ripe fruit
-   * collected -> Final Shipment queue finishes -> day accounting finalizes
-   * -> dayEnded becomes the completed closed-day state. Flipping
-   * `closing` false and `dayEnded` true together here (rather than
-   * `dayEnded` at the start of Closing, as the old same-tick endDay() did)
-   * is what keeps Final Shipment revenue attributed to the closing day
-   * instead of leaking into the next one (see the dayHarvestRevenue/
-   * dayMarketBonus guard in update()).
+   * collected -> Final Shipment queue finishes -> Operating Cost deducted
+   * -> day accounting finalizes -> dayEnded becomes the completed
+   * closed-day state. Flipping `closing` false and `dayEnded` true
+   * together here (rather than `dayEnded` at the start of Closing, as the
+   * old same-tick endDay() did) is what keeps Final Shipment revenue
+   * attributed to the closing day instead of leaking into the next one
+   * (see the dayHarvestRevenue/dayMarketBonus guard in update()) — and, by
+   * the same construction, guarantees Operating Cost is only ever deducted
+   * here, exactly once, strictly after Final Shipment has fully paid out.
    */
   private finishClosing(): void {
-    const expenses = dailyExpenses(this.unlockedFields().length);
-    this.state.cash -= expenses;
-
     // dayHarvestRevenue/dayMarketBonus accumulate exact, unrounded per-apple
-    // dollars all day (see priceHarvestedApple) — round only here, for the
-    // summary. Round the combined total once, then derive harvestRevenue by
-    // rounding just that component and marketBonus as the remainder, so the
-    // two displayed line items always sum to the rounded whole rather than
-    // each independently rounding away a few cents in the same direction
-    // (which could otherwise silently drift net by a dollar).
-    const combined = this.state.dayHarvestRevenue + this.state.dayMarketBonus;
-    const harvestRevenue = Math.round(this.state.dayHarvestRevenue);
-    const marketBonus = Math.round(combined) - harvestRevenue;
-    const net = harvestRevenue + marketBonus + this.state.dayContestPrize - expenses;
+    // dollars all day (see priceHarvestedApple); dayContestPrize is always
+    // an exact whole-dollar amount (see the CONTEST_DAY4/FAIR_DAY7 prize
+    // tables). Round the shipment total to the nearest CENT (not whole
+    // dollar) once, then derive harvestRevenue by rounding just that
+    // component and marketBonus as the remainder, so the two displayed line
+    // items always sum exactly to the rounded whole.
+    const dayShipmentRevenue = this.state.dayHarvestRevenue + this.state.dayMarketBonus;
+    const combinedCents = Math.round(dayShipmentRevenue * 100);
+    const harvestRevenueCents = Math.round(this.state.dayHarvestRevenue * 100);
+    const marketBonusCents = combinedCents - harvestRevenueCents;
+    const harvestRevenue = harvestRevenueCents / 100;
+    const marketBonus = marketBonusCents / 100;
+    const contestPrize = this.state.dayContestPrize;
+
+    const operatingCostAmount = operatingCost(this.state.day, this.unlockedFields().length);
+    const net = harvestRevenue + marketBonus + contestPrize - operatingCostAmount;
+
+    // `cash` has been accumulating today's exact, unrounded shipment/
+    // contest revenue in real time all day (see update()'s Shipping drain
+    // and the contest-submission methods) — full fractional precision is
+    // preserved there deliberately, and untouched by this pass. Here, at
+    // the one settlement boundary per day, subtract that exact raw revenue
+    // back out and replace it with `net` — built from the exact same
+    // rounded harvestRevenue/marketBonus/contestPrize figures the summary
+    // above displays — so the displayed cash change for this settlement is
+    // guaranteed to equal displayed Net to the cent BY CONSTRUCTION (both
+    // derive from the identical rounded numbers), not merely "usually":
+    // independently re-rounding a separately-accumulated cash total here
+    // instead (as a first pass at this fix did) can disagree with the
+    // summary by exactly $0.01 on adversarial fractional inputs landing on
+    // a half-cent boundary, since floating-point addition isn't
+    // associative — two differently-ordered sums of the same values don't
+    // always land on the same side of a rounding boundary. `Math.round`
+    // here only re-snaps negligible floating-point residue (real apple
+    // economy inputs are nowhere near that boundary) — it never touches
+    // whatever ELSE moved cash today (Field/Irrigation/Shipping purchases,
+    // breeding costs — already exact whole-dollar amounts).
+    const nonRevenueCash = Math.round((this.state.cash - dayShipmentRevenue - contestPrize) * 100) / 100;
+    this.state.cash = nonRevenueCash + net;
 
     const log: DayLogEntry = {
       day: this.state.day,
       harvestRevenue,
       marketBonus,
-      contestPrize: this.state.dayContestPrize,
-      expenses,
+      contestPrize,
+      operatingCost: operatingCostAmount,
       net,
     };
     this.state.lastDayLog = log;
