@@ -778,15 +778,44 @@ this pass.
 **UI**: a weather-report-style overview (`ui/MarketScreen.ts`,
 `openMarketOverview`) shows one card per discovered Visual Variety — apple
 image, catalog identity (`COMMON · #001` etc, never the internal
-`visualId`), today's `+X%`/`-X%` vs baseline, a RISING/STABLE/FALLING badge,
-and a self-normalized ~5-day sparkline. It's opened from the existing HUD
-Market headline (a small interactive zone over that text, no new
+`visualId`), today's `+X%`/`-X%` vs baseline, a compact `Today ±Npt`
+daily-movement line, and a ~5-day sparkline. It's opened from the existing
+HUD Market headline (a small interactive zone over that text, no new
 bottom-nav tab, no HUD reorder) rather than a dedicated screen — the
 smallest V1 access path, reusable/replaceable during the future Orchard/
 global UI redesign. The headline itself (`HUD.ts`) is deterministic:
 whichever discovered variety currently has the largest `|pct|`
 (`strongestMover`), e.g. `Market: #005 +18% ▸`, or `Market: steady ▸` when
 nothing is moving.
+
+**Graph clarity pass** (presentation only, no simulation/pricing change —
+`systems/marketDisplay.ts`): every card's sparkline shares one fixed
+vertical mapping, `TUNING.MARKET_PCT_MIN..MAX` (-50%..+60%) → chart
+bottom..top (`pctToChartUnit`), instead of each card self-normalizing to
+its own recent min/max — a +10% entry now always reads as only modestly
+above baseline, and cards are directly visually comparable to each other. A
+dashed, neutral-gray 0% reference line is always drawn (the fixed range
+always spans 0) — dashed specifically so it stays visually distinguishable
+from the solid green history line even where the two nearly overlap. The
+large current `+X%` (baseline-relative level) is now paired with a smaller
+`Today ±Npt` line showing the newest day's movement in whole percentage
+points, derived from the latest two `history` entries
+(`dailyChangeFromHistory`) — this is what makes `+10% / Today -4pt ▼`
+readable as "still above baseline, but fell today" instead of the two
+numbers implicitly conflicting. `Today ±Npt` is the card's only visible
+directional indicator — the separate RISING/STABLE/FALLING text row was
+removed as a second playtest polish pass once this line existed, since the
+two said the same thing; `VisualMarketEntry.trend` itself is completely
+unaffected and still drives next-day trend bias exactly as before, it's
+just no longer echoed as its own row. The vertical space that row freed
+went to the sparkline itself, grown from ~42px to 64px tall (still the
+exact same fixed -50%..+60% mapping, just easier to read) with `CARD_H`
+unchanged at 280. One history point displays `Today —` rather than
+inventing a prior value. No change to trend calculation, history length,
+clamp range, or any other Market V1 simulation rule; see
+`scripts/verify-market-display.ts` for focused chart-mapping/daily-change
+verification (kept separate from `scripts/verify-market.ts`, which still
+covers simulation behavior only).
 
 **Save migration**: old saves have no `visualMarket` at all (the old
 color/pattern `marketModifiers` bridge isn't semantically convertible to
@@ -1090,27 +1119,20 @@ longer simply flush an unbounded queue for free. Exact
 implementation/numbers are not decided yet; explicitly out of scope for
 this pass (no Shipping Box, no capacity/speed upgrades implemented here).
 
-### Market graph polish (future UI pass — design only, not implemented)
+### Market graph polish — IMPLEMENTED
 
-`ui/MarketScreen.ts`'s current sparkline is self-normalized per card (see
-Market V1 above) rather than sharing one shared scale across cards. A
-future polish pass is expected to give it a fixed shared vertical scale, a
-visibly marked 0% baseline, and a clearer visual distinction between a
-Visual's current level and today's own movement — conceptually something
-like:
-
-```
-+10%
-Today -4pt ▼
-```
-
-Not implemented in this pass; the current Market V1 graph is unchanged.
+`ui/MarketScreen.ts`'s sparkline now shares one fixed vertical scale across
+every card (Market V1's own legal range, -50%..+60%) instead of
+self-normalizing per card, draws a visibly marked 0% baseline, and pairs
+the current baseline-relative `+X%` with a separate `Today ±Npt` daily-
+movement line. See Market V1's "Graph clarity pass" subsection above and
+`systems/marketDisplay.ts`/`scripts/verify-market-display.ts`.
 
 ### Revised priority order
 
-Shipping Pipeline, Day Cycle, Daily Operating Cost, Market V1, and Orchard
-Mutation / Breeding Specimen are done (see their sections above) —
-remaining order:
+Shipping Pipeline, Day Cycle, Daily Operating Cost, Market V1 (incl. its
+graph clarity pass), and Orchard Mutation / Breeding Specimen are done (see
+their sections above) — remaining order:
 
 1. Orchard / global UI redesign
 2. Freshness integration

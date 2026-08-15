@@ -4,6 +4,7 @@ import type { MarketHistoryPoint, VisualMarketEntry } from '../types.ts';
 import { AppleVisual } from '../render/AppleVisual.ts';
 import { APPLE_ASSET_IDS, APPLE_RARITY, catalogLabel } from '../render/appleAssets.ts';
 import { formatMarketPct, initVisualMarketEntry } from '../systems/market.ts';
+import { dailyChangeFromHistory, formatDailyChange, pctToChartUnit, zeroLineChartUnit } from '../systems/marketDisplay.ts';
 import { THEME } from './theme.ts';
 import { Button, panel, text as mkText } from './uiKit.ts';
 import { createModal } from './modals.ts';
@@ -12,7 +13,7 @@ const POS_COLOR = '#2f5a20';
 const NEG_COLOR = '#b23b3b';
 const COLS = 5;
 const CARD_GAP = 16;
-const CARD_H = 268;
+const CARD_H = 280;
 
 // Ownership-status label colors — deliberately the same small, non-bold
 // treatment for both states so the badge stays visually secondary to the
@@ -106,19 +107,37 @@ function drawMarketCard(
   container.add(apple);
 
   let ty = y + 24 + appleSizePx + 14;
+  // Current level — % above/below the normal baseline price (unchanged meaning).
   const pctColor = entry.pct > 0.003 ? POS_COLOR : entry.pct < -0.003 ? NEG_COLOR : THEME.textMid;
   container.add(mkText(scene, x + w / 2, ty, formatMarketPct(entry.pct), 30, pctColor, true, true).setOrigin(0.5, 0));
-  ty += 40;
+  ty += 36;
 
-  const trendColor = entry.trend === 'RISING' ? POS_COLOR : entry.trend === 'FALLING' ? NEG_COLOR : THEME.textMid;
-  const trendLabel = entry.trend === 'RISING' ? '▲ RISING' : entry.trend === 'FALLING' ? '▼ FALLING' : '▬ STABLE';
-  container.add(mkText(scene, x + w / 2, ty, trendLabel, 18, trendColor, true).setOrigin(0.5, 0));
-  ty += 34;
+  // Today's movement — deliberately separate from the current level above:
+  // the current % can stay well above baseline even on a day the price fell
+  // (see PROJECT.md's Market graph clarity pass). Percentage POINTS, derived
+  // straight from the newest two history entries, never invented. This is
+  // now the ONLY directional indicator on the card — the separate RISING/
+  // FALLING/STABLE text row was removed as redundant with this line (both
+  // said the same thing); `entry.trend` itself is untouched and still drives
+  // next-day Market bias exactly as before, it's just no longer echoed here
+  // as its own visible row.
+  const daily = dailyChangeFromHistory(entry.history);
+  const dailyColor = daily.points === null || daily.points === 0 ? THEME.textMid : daily.points > 0 ? POS_COLOR : NEG_COLOR;
+  container.add(mkText(scene, x + w / 2, ty, formatDailyChange(daily), 15, dailyColor, false, true).setOrigin(0.5, 0));
+  ty += 26;
 
-  drawSparkline(scene, container, x + 16, ty, w - 32, 42, entry.history);
+  // Freed vertical space (the removed trend row) goes to the sparkline
+  // itself — same fixed -50%..+60% mapping, just taller/easier to read.
+  drawSparkline(scene, container, x + 16, ty, w - 32, 64, entry.history);
 }
 
-/** Compact ~5-day price-history line, self-normalized to its own min/max (padded to always include the 0% baseline) so small day-to-day moves stay visible. */
+/**
+ * Compact ~5-day price-history line. Uses the SAME fixed +60%/0%/-50% vertical
+ * mapping on every card (`pctToChartUnit`, see systems/marketDisplay.ts) —
+ * never self-normalized to this card's own recent min/max — so cards stay
+ * directly visually comparable and a +10% entry reads as only modestly above
+ * the always-drawn 0% baseline line rather than exaggerated/inverted.
+ */
 function drawSparkline(
   scene: Phaser.Scene,
   container: Phaser.GameObjects.Container,
@@ -130,24 +149,25 @@ function drawSparkline(
 ): void {
   const g = scene.add.graphics();
   container.add(g);
-  if (history.length === 0) return;
-
-  const pcts = history.map((p) => p.pct);
-  let min = Math.min(...pcts, 0);
-  let max = Math.max(...pcts, 0);
-  if (max - min < 0.02) {
-    min -= 0.01;
-    max += 0.01;
-  }
 
   const n = history.length;
   const pointX = (i: number) => x + (n === 1 ? w / 2 : (i / (n - 1)) * w);
-  const pointY = (pct: number) => y + h - ((pct - min) / (max - min)) * h;
+  const pointY = (pct: number) => y + h - pctToChartUnit(pct) * h;
 
-  if (min <= 0 && max >= 0) {
-    g.lineStyle(1, 0x9c9484, 0.5);
-    g.lineBetween(x, pointY(0), x + w, pointY(0));
+  // 0% reference line — always present since the fixed chart range always
+  // spans 0%. Dashed + neutral gray (rather than solid) so it stays clearly
+  // secondary to, and distinguishable from, the solid green history line
+  // even where the two nearly overlap — a plain thin solid line in a
+  // similar tone read as too close to the history line in playtest.
+  g.lineStyle(1.5, 0x9a9690, 0.65);
+  const zeroY = y + h - zeroLineChartUnit() * h;
+  const dash = 5;
+  const gap = 4;
+  for (let dx = 0; dx < w; dx += dash + gap) {
+    g.lineBetween(x + dx, zeroY, x + Math.min(dx + dash, w), zeroY);
   }
+
+  if (n === 0) return;
 
   g.lineStyle(2.5, THEME.accent, 0.9);
   g.beginPath();
@@ -160,7 +180,7 @@ function drawSparkline(
   g.strokePath();
 
   const lastX = pointX(n - 1);
-  const lastY = pointY(pcts[n - 1]);
+  const lastY = pointY(history[n - 1].pct);
   g.fillStyle(THEME.accent, 1);
   g.fillCircle(lastX, lastY, 3.5);
 }
