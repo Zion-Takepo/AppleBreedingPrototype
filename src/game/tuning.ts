@@ -5,6 +5,11 @@
 
 export const TUNING = {
   DAY_DURATION_SEC: 90,
+  // Digital day clock, shown in the HUD as "DAY N · HH:MM" — purely a
+  // display mapping onto the existing DAY_DURATION_SEC pacing above (no
+  // separate duration to balance here; see systems/clock.ts).
+  DAY_START_HOUR: 9,
+  DAY_END_HOUR: 18,
 
   // Each of the 15 Orchard fruit slots regrows independently. Mean regrow
   // time is driven by the planted variety's genetic Growth stat:
@@ -34,6 +39,10 @@ export const TUNING = {
   // queue's head item spends processing before it ships and pays out.
   // Tunable here for easy human playtesting.
   PROCESSING_SECONDS_PER_APPLE: 1.0,
+  // Closing (see Game.beginClosing) accelerates the same queue to this much
+  // faster a cadence so a typical remaining queue finishes in roughly a
+  // couple of seconds instead of trickling in at the normal daytime rate.
+  FINAL_SHIPMENT_SECONDS_PER_APPLE: 0.12,
 
   STARTING_CASH: 50,
 

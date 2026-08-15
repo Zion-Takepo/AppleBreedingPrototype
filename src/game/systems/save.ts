@@ -53,6 +53,14 @@ function migrateState(state: GameState): void {
   if (!Array.isArray(state.processingQueue)) state.processingQueue = [];
   if (typeof state.processingTimer !== 'number') state.processingTimer = 0;
 
+  // Saves from before the Day Cycle pass have no `closing` flag at all —
+  // default to false (not mid-Closing). A save written WHILE `closing` was
+  // already true resumes safely as-is: update() keeps draining the
+  // Processing Queue at the Final Shipment cadence and calls finishClosing()
+  // once it's empty, exactly as it would have without the reload — no
+  // duplicate collection/payout and no permanent Closing stall.
+  if (typeof state.closing !== 'boolean') state.closing = false;
+
   // Root-cause fix for GREEN BASIC visually showing the red C1 apple: this
   // fallback used to blindly assign 'C1' to *any* Line missing a visualId
   // (from saves written before the visual-rarity pass existed at all),

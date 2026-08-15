@@ -81,6 +81,13 @@ export class MainScene extends Phaser.Scene {
       if (event.type === 'traitDiscovered' && this.activeScreen !== 'COLLECTION') {
         this.toasts.show('New trait discovered!', THEME.gold);
       }
+      // Closing (automatic 18:00 or manual END DAY — see Game.beginClosing)
+      // finishes asynchronously once the accelerated Final Shipment queue
+      // drains, so the summary modal is shown from this event rather than
+      // synchronously from the END DAY click handler.
+      if (event.type === 'dayClosed' && this.logic.state.lastDayLog) {
+        this.showEndDayFlow(this.logic.state.lastDayLog);
+      }
     });
 
     this.showScreen('ORCHARD');
@@ -157,9 +164,11 @@ export class MainScene extends Phaser.Scene {
   }
 
   private onEndDay(): void {
-    const log = this.logic.endDay();
-    if (!log) return;
-    this.showEndDayFlow(log);
+    // Manual END DAY invokes the exact same Closing procedure the automatic
+    // 18:00 trigger does (see Game.beginClosing) — the summary modal itself
+    // is shown later, from the 'dayClosed' event once Closing actually
+    // finishes (see the listener registered in create()).
+    this.logic.beginClosing();
     this.refreshAll();
   }
 

@@ -155,6 +155,12 @@ export interface GameState {
   day1YellowGuaranteeUsed: boolean;
   lastDayLog: DayLogEntry | null;
   dayEnded: boolean;
+  // True from the moment Closing begins (automatic 18:00 or manual END DAY)
+  // until Final Shipment drains the Processing Queue and settlement
+  // finishes (see Game.beginClosing/finishClosing) — growth freezes for
+  // this whole window, same as dayEnded, but dayEnded itself only flips
+  // true once settlement actually completes (see PROJECT.md Day Cycle).
+  closing: boolean;
   weekComplete: boolean;
   dayHarvestRevenue: number;
   dayMarketBonus: number;

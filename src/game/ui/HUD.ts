@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
 import { getDayDef, nextEvent } from '../systems/calendar.ts';
+import { gameClockLabel } from '../systems/clock.ts';
 import { describeTopModifier } from '../systems/market.ts';
 import { LAYOUT, THEME } from './theme.ts';
 import { Button, formatMoney, text as mkText } from './uiKit.ts';
@@ -94,8 +95,16 @@ export class HUD extends Phaser.GameObjects.Container {
   refresh(): void {
     const s = this.game.state;
     this.dayText.setText(`DAY ${s.day}`);
-    const secs = Math.ceil(s.dayTimeRemaining);
-    this.timerText.setText(s.dayActive ? `${secs}s left` : 'Day ended');
+    // Ended state lives in this same DAY/TIME area (not a separate "Day
+    // ended" item) — see PROJECT.md Day Cycle. Full future HUD
+    // reorder/redesign is intentionally out of scope for this pass.
+    if (s.dayEnded) {
+      this.timerText.setText('· CLOSED');
+    } else if (s.closing) {
+      this.timerText.setText('· CLOSING…');
+    } else {
+      this.timerText.setText(`· ${gameClockLabel(s.dayTimeRemaining)}`);
+    }
     this.cashText.setText(`$${formatMoney(s.cash)}`);
 
     const marketDesc = describeTopModifier(s.marketModifiers);
@@ -114,6 +123,6 @@ export class HUD extends Phaser.GameObjects.Container {
     }
 
     this.endDayBtn.setEnabled(this.game.canEndDay());
-    this.endDayBtn.setText(s.dayActive ? 'END DAY' : 'END DAY ✓');
+    this.endDayBtn.setText(s.closing ? 'CLOSING…' : s.dayEnded ? 'END DAY ✓' : 'END DAY');
   }
 }

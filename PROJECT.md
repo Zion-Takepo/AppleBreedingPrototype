@@ -397,6 +397,75 @@ always reappears and the game is never trapped. `Game.endDay()` itself
 already no-ops on a second call (`canEndDay()` requires `!dayEnded`), so
 double-clicking END DAY was never able to double-charge expenses.
 
+## Day Cycle
+
+A digital 09:00-18:00 game clock (`systems/clock.ts` `gameClockLabel()`)
+maps directly onto the existing `TUNING.DAY_DURATION_SEC` (90s) pacing —
+no separate duration was introduced; `TUNING.DAY_START_HOUR`/
+`DAY_END_HOUR` are tunable for later playtesting. The HUD's DAY/TIME area
+reads `DAY 3 · 14:26` during play; once Closing begins it becomes
+`DAY 3 · CLOSING…`, and once Closing completes, `DAY 3 · CLOSED` — the
+ended state lives in this same compact area rather than a separate "Day
+ended" item (full HUD reorder/redesign is still future work, see below).
+
+Automatic 18:00 Closing (`dayTimeRemaining` reaching 0) and a manual END
+DAY click both call the exact same `Game.beginClosing()` — the one shared
+Closing procedure, idempotent via an early `if (this.state.closing ||
+this.state.dayEnded) return false;` guard, so repeated clicks/calls (or a
+reload landing mid-Closing) can never collect or pay twice. Manual END DAY
+is available any time the day is playable, not just after 18:00 — ending
+early sacrifices whatever growth time remained, by design.
+
+`beginClosing()`:
+1. Sets `dayActive = false` and `closing = true` — `closing` (alongside
+   `dayEnded`) gates the per-slot regrow loop in `Game.update()`, so growth
+   freezes immediately; partially-grown fruit is left exactly as-is, never
+   force-ripened.
+2. Collects every currently-*ripe* fruit slot across every unlocked/planted
+   Field through the same `harvestFruitSlot()` path normal harvesting uses
+   — no alternate pricing path — pushing them onto the existing single
+   farm-wide Processing Queue.
+
+`Game.update()` then drains that same queue as always, but at an
+accelerated **Final Shipment** cadence while `closing` is true
+(`TUNING.FINAL_SHIPMENT_SECONDS_PER_APPLE`, default **0.12s/apple** vs the
+normal `PROCESSING_SECONDS_PER_APPLE` 1.0s/apple — roughly 8x faster, tuned
+so a typical remaining queue finishes in a couple of seconds) — still the
+one shared queue, never a second one, never a pricing change. Once the
+queue is fully empty, `update()` calls the private `finishClosing()`, which
+runs the existing daily-expense/day-log settlement math and only then sets
+`dayEnded = true` (`closing` back to `false`) and emits a `'dayClosed'`
+event. This ordering — Closing begins → ripe fruit collected → Final
+Shipment queue finishes → day accounting finalizes → `dayEnded` becomes the
+completed closed-day state — is what keeps Final Shipment revenue
+attributed to the closing day: the existing `dayHarvestRevenue`/
+`dayMarketBonus` guard in `update()` only stops accumulating once `dayEnded`
+is actually true, which by construction doesn't happen until after the
+queue is empty, so nothing can leak into the next day's summary.
+
+`MainScene` no longer gets a synchronous log back from ending the day —
+`onEndDay()` just calls `beginClosing()`; the END DAY summary modal is
+shown from a `'dayClosed'` event listener once Closing genuinely finishes.
+The existing reload-recovery check (`dayEnded && lastDayLog` re-entering
+the summary-modal flow on load) still covers a reload landing after
+Closing completed but before the modal was clicked through; a reload
+landing *during* Closing needs no special-case code at all — `closing` is
+persisted, so `Game.update()` simply keeps draining the queue at the Final
+Shipment cadence and calls `finishClosing()` once it empties, exactly as it
+would have without the reload. Old saves without a `closing` field migrate
+to `false` (`systems/save.ts`).
+
+Next-day transition (`Game.advanceDayInternal()`) is unchanged in spirit:
+clock resets to 09:00 (`dayTimeRemaining = DAY_DURATION_SEC`), growth
+resumes, and Shipping returns to the normal 1.0s/apple cadence (explicitly
+resets `closing = false` too, defensively, alongside the existing
+`dayEnded = false` reset).
+
+Not yet implemented (still future work, see Planned direction below):
+Daily Operating Cost, the Orchard/global HUD redesign (including the
+approved DAY/TIME → MARKET → NEXT CONTEST → MONEY → END DAY ordering),
+morning fades/rooster audio/page-flip transitions, and Freshness.
+
 ## Persistence
 
 Entire `GameState` is JSON-serialized to `localStorage` under one key
@@ -438,11 +507,11 @@ apple; a bred Line never has this id (bred Lines get a fresh
   resolved), slot timers stop advancing entirely — already-ripe fruit stays
   ripe, partially-grown fruit stays frozen at its exact progress, and no new
   fruit can ripen — so a settled day visibly stops producing new fruit
-  while the END DAY summary is on screen. The Shipping/Processing Queue
-  itself is NOT covered by this freeze and keeps draining (see Shipping
-  Pipeline above). Day-length/clock rules themselves are otherwise
-  unchanged and still out of scope (no 09:00-18:00 Day Cycle or Final
-  Shipment yet).
+  while the END DAY summary is on screen. The Day Cycle pass (see Day Cycle
+  above) widened this same freeze to also cover the whole Closing window
+  (`state.closing`, not just `dayEnded`), and added the accelerated Final
+  Shipment cadence that actually drains the Processing Queue at day's end
+  instead of leaving it to trickle in at the normal rate.
 
 Offspring resolution is intentionally forced: the player must KEEP exactly
 one of the four candidates (no discard/reroll option). This is a core
@@ -482,14 +551,6 @@ shipping/basket status + processing status portion of the lower-right card
 already has a real implementation to surface (see Shipping Pipeline above)
 once this redesign happens — it isn't placeholder-only anymore.
 
-### Day Cycle
-
-Target day window: roughly 09:00–18:00, shown as a compact digital clock
-(replaces today's plain countdown timer). At 18:00: collect remaining mature
-fruit, finish whatever's left in the processing queue, perform a Final
-Shipment, settle the day, then transition to the next day. Manual END DAY
-runs that same closing procedure early, not a different one.
-
 ### Daily Operating Cost
 
 Replaces today's flat `$15 + $20/field` daily expense (see Economy above)
@@ -513,13 +574,13 @@ hidden/unknown.
 
 ### Revised priority order
 
-Shipping Pipeline is done (see Shipping Pipeline above) — remaining order:
+Shipping Pipeline and Day Cycle are done (see their sections above) —
+remaining order:
 
-1. Day Cycle
-2. Daily Operating Cost
-3. Orchard / global UI redesign
-4. Market V1
-5. Freshness integration
-6. Collection / Library / Replant cleanup
-7. Orchard mutation-fruit discoveries
-8. Final art / animation / sound / font polish
+1. Daily Operating Cost
+2. Orchard / global UI redesign
+3. Market V1
+4. Freshness integration
+5. Collection / Library / Replant cleanup
+6. Orchard mutation-fruit discoveries
+7. Final art / animation / sound / font polish

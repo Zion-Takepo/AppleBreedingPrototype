@@ -79,6 +79,7 @@ function createInitialState(): GameState {
     day1YellowGuaranteeUsed: false,
     lastDayLog: null,
     dayEnded: false,
+    closing: false,
     weekComplete: false,
     dayHarvestRevenue: 0,
     dayMarketBonus: 0,
@@ -93,6 +94,7 @@ export type GameEvent =
   | { type: 'shipment'; fieldId: number; revenue: number }
   | { type: 'breedingReady' }
   | { type: 'traitDiscovered' }
+  | { type: 'dayClosed' }
   | { type: 'changed' };
 
 type Listener = (event: GameEvent) => void;
@@ -186,9 +188,14 @@ export class Game {
 
     if (this.state.dayActive) {
       this.state.dayTimeRemaining = Math.max(0, this.state.dayTimeRemaining - dtSeconds);
-      if (this.state.dayTimeRemaining <= 0) {
-        this.state.dayActive = false;
-      }
+      changed = true;
+    }
+    // 18:00 (dayTimeRemaining hits 0) triggers the exact same Closing
+    // procedure a manual END DAY click does (see beginClosing) — idempotent,
+    // so this firing again on a later frame (or DebugPanel's "Skip Day
+    // Timer" setting dayTimeRemaining=0 directly) can't double-close.
+    if (this.state.dayActive && this.state.dayTimeRemaining <= 0) {
+      this.beginClosing();
       changed = true;
     }
 
@@ -196,14 +203,12 @@ export class Game {
     // timer now — there's no whole-field "growth cycle" to freeze, so
     // slots keep regrowing continuously regardless of which field tab is
     // selected or whether the day is still active (dayActive=false, e.g.
-    // the timer simply ran out). Once the day is actually SETTLED
-    // (dayEnded — the player clicked END DAY and it resolved), growth
-    // freezes: already-ripe fruit stays ripe (skipped below regardless),
-    // and partially-grown fruit stops advancing and stays frozen at its
-    // current progress rather than silently ripening while the END DAY
-    // summary is on screen. This is deliberately narrower than the future
-    // Day Cycle/Final Shipment — it only stops new fruit from appearing.
-    if (!this.state.dayEnded) {
+    // the timer simply ran out). Once Closing has begun (state.closing —
+    // automatic 18:00 or manual END DAY) or the day is fully SETTLED
+    // (dayEnded), growth freezes: already-ripe fruit stays ripe (skipped
+    // below regardless), and partially-grown fruit stops advancing and
+    // stays frozen at its current progress.
+    if (!this.state.dayEnded && !this.state.closing) {
       for (const field of this.state.fields) {
         if (!field.unlocked || !field.varietyId) continue;
         for (const slot of field.slots) {
@@ -230,13 +235,15 @@ export class Game {
         // Cash/totalRevenue are always paid — this money was genuinely
         // earned the instant the apple was harvested/priced, regardless of
         // day state. dayHarvestRevenue/dayMarketBonus, however, exist only
-        // to feed the CURRENT day's END DAY summary snapshot and get reset
-        // to 0 on the next advanceDayInternal(); once the day is already
-        // settled (dayEnded) that snapshot has already been taken and shown,
-        // so continuing to add to them here would just leak revenue that
-        // never appears in any summary. Guarding this (not the queue/cash
-        // itself) keeps the queue draining continuously exactly like fruit
-        // regrow already does, with no new Day Cycle/Final Shipment logic.
+        // to feed the CURRENT day's settlement snapshot (finishClosing) and
+        // get reset to 0 on the next advanceDayInternal(); once the day is
+        // already settled (dayEnded) that snapshot has already been taken
+        // and shown, so continuing to add to them here would just leak
+        // revenue that never appears in any summary. During Closing itself
+        // dayEnded is still false (it only flips true once the queue is
+        // fully drained — see finishClosing below), so Final Shipment
+        // revenue is correctly still counted into the closing day's own
+        // summary, never the next day's.
         this.state.cash += item.value;
         this.state.totalRevenue += item.value;
         if (!this.state.dayEnded) {
@@ -247,9 +254,18 @@ export class Game {
         // two decimal places, so no rounding belongs here (see HUD.ts).
         this.emit({ type: 'shipment', fieldId: item.fieldId, revenue: item.value });
         changed = true;
-        this.state.processingTimer += TUNING.PROCESSING_SECONDS_PER_APPLE;
+        this.state.processingTimer += this.processingCadenceSeconds();
       }
       if (this.state.processingQueue.length === 0) this.state.processingTimer = 0;
+    }
+
+    // Closing (state.closing) stays true until the accelerated Final
+    // Shipment drain above has fully emptied the shared queue — only then
+    // does settlement actually run, so Final Shipment revenue is always
+    // folded into the closing day's own summary (see finishClosing).
+    if (this.state.closing && this.state.processingQueue.length === 0) {
+      this.finishClosing();
+      changed = true;
     }
 
     const breeding = this.state.breeding;
@@ -262,6 +278,14 @@ export class Game {
     }
 
     if (changed) this.notify();
+  }
+
+  // Normal daytime Shipping stays TUNING.PROCESSING_SECONDS_PER_APPLE
+  // (1.0s/apple); Closing (state.closing) switches the SAME queue to the
+  // faster TUNING.FINAL_SHIPMENT_SECONDS_PER_APPLE cadence — never a second
+  // queue, never a pricing change.
+  private processingCadenceSeconds(): number {
+    return this.state.closing ? TUNING.FINAL_SHIPMENT_SECONDS_PER_APPLE : TUNING.PROCESSING_SECONDS_PER_APPLE;
   }
 
   private resolveBreeding(): void {
@@ -352,7 +376,7 @@ export class Game {
     // behind others already in line must not reset the head's remaining
     // processing time.
     if (this.state.processingQueue.length === 1) {
-      this.state.processingTimer = TUNING.PROCESSING_SECONDS_PER_APPLE;
+      this.state.processingTimer = this.processingCadenceSeconds();
     }
 
     this.notify();
@@ -624,12 +648,60 @@ export class Game {
   // ----------------------------------------------------------------
   // Day cycle
   // ----------------------------------------------------------------
+  // A manual END DAY click is allowed any time the day is actually playable
+  // — early ending sacrifices remaining growth time by design (see
+  // beginClosing) rather than being blocked until 18:00.
   canEndDay(): boolean {
-    return this.state.dayTimeRemaining <= 0 && !this.state.dayEnded;
+    return !this.state.dayEnded && !this.state.closing;
   }
 
-  endDay(): DayLogEntry | null {
-    if (!this.canEndDay()) return null;
+  /**
+   * The ONE shared Closing procedure — triggered automatically at 18:00
+   * (dayTimeRemaining hits 0, see update()) and by a manual END DAY click,
+   * always through this exact same method. Idempotent: a second call while
+   * already closing/ended is a no-op, so repeated clicks/calls can never
+   * collect or pay twice. Freezes growth immediately (state.closing also
+   * gates the regrow loop in update()), then collects every currently-ripe
+   * fruit slot across all unlocked/planted Fields through the SAME
+   * harvestFruitSlot() path normal harvesting uses — no alternate pricing
+   * path, and partially-grown fruit is left untouched, never force-ripened.
+   * Collected fruit joins the existing shared Processing Queue; update()
+   * then drains it at the accelerated Final Shipment cadence
+   * (processingCadenceSeconds) and calls finishClosing() once it's empty —
+   * settlement itself is deliberately NOT done here, so Final Shipment
+   * revenue is always included before the day's summary is computed.
+   */
+  beginClosing(): boolean {
+    if (this.state.closing || this.state.dayEnded) return false;
+    this.state.dayActive = false;
+    this.state.closing = true;
+
+    for (const field of this.state.fields) {
+      if (!field.unlocked || !field.varietyId) continue;
+      const ripeIndices: number[] = [];
+      field.slots.forEach((slot, i) => {
+        if (slot.ripe) ripeIndices.push(i);
+      });
+      for (const i of ripeIndices) this.harvestFruitSlot(field.id, i);
+    }
+
+    this.notify();
+    return true;
+  }
+
+  /**
+   * Runs once the Processing Queue has fully drained after beginClosing()
+   * (called only from update() — see the `state.closing` check there),
+   * completing the settlement ordering: Closing begins -> ripe fruit
+   * collected -> Final Shipment queue finishes -> day accounting finalizes
+   * -> dayEnded becomes the completed closed-day state. Flipping
+   * `closing` false and `dayEnded` true together here (rather than
+   * `dayEnded` at the start of Closing, as the old same-tick endDay() did)
+   * is what keeps Final Shipment revenue attributed to the closing day
+   * instead of leaking into the next one (see the dayHarvestRevenue/
+   * dayMarketBonus guard in update()).
+   */
+  private finishClosing(): void {
     const expenses = dailyExpenses(this.unlockedFields().length);
     this.state.cash -= expenses;
 
@@ -654,9 +726,9 @@ export class Game {
       net,
     };
     this.state.lastDayLog = log;
+    this.state.closing = false;
     this.state.dayEnded = true;
-    this.notify();
-    return log;
+    this.emit({ type: 'dayClosed' });
   }
 
   proceedToNextDay(): void {
@@ -679,6 +751,7 @@ export class Game {
     this.state.dayTimeRemaining = TUNING.DAY_DURATION_SEC;
     this.state.dayActive = true;
     this.state.dayEnded = false;
+    this.state.closing = false;
     this.state.marketModifiers = computeMarketForDay(this.state.day);
     this.state.dayHarvestRevenue = 0;
     this.state.dayMarketBonus = 0;
