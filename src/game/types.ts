@@ -103,6 +103,27 @@ export interface BreedingState {
 
 export type MarketModifiers = Partial<Record<AppleColor | ApplePattern, number>>;
 
+export type MarketTrend = 'RISING' | 'STABLE' | 'FALLING';
+
+export interface MarketHistoryPoint {
+  day: number;
+  // Percent above/below baseline at this point, e.g. 0.12 = +12%.
+  pct: number;
+}
+
+// One Visual Variety's persistent Market state (see PROJECT.md Market V1).
+// Keyed by AppleAssetId (C1..E2) in GameState.visualMarket below — price is
+// per Visual Variety, NEVER per individual owned Line: every Line sharing a
+// visualId shares this exact entry. Only DISCOVERED visualIds ever get one.
+export interface VisualMarketEntry {
+  visualId: AppleAssetId;
+  // Percent above/below baseline (0 = baseline/1.00x multiplier).
+  pct: number;
+  trend: MarketTrend;
+  // Oldest-first, capped to roughly TUNING.MARKET_HISTORY_DAYS entries.
+  history: MarketHistoryPoint[];
+}
+
 export interface ContestResult {
   day: number;
   varietyId: string;
@@ -149,7 +170,9 @@ export interface GameState {
   breeding: BreedingState;
   irrigationLevel: number;
   shippingLevel: number;
-  marketModifiers: MarketModifiers;
+  // Market V1 state — one entry per DISCOVERED Visual Variety (see
+  // systems/market.ts). Undiscovered visualIds never get an entry.
+  visualMarket: Record<AppleAssetId, VisualMarketEntry>;
   totalRevenue: number;
   contestResults: ContestResult[];
   day4ContestDone: boolean;

@@ -356,6 +356,113 @@ Sweetness/Size used for harvest value and contest scoring — genetic stats
 used for breeding are never touched, and cultivation never affects Yield's
 active-slot count or harvest quantity.
 
+## Market V1
+
+Price exists per **Visual Variety** (the illustration/`visualId`, C1..E2 —
+see Visual Rarity above), never per individual owned Line: every Line
+sharing a visualId shares the exact same market entry
+(`GameState.visualMarket: Record<AppleAssetId, VisualMarketEntry>`,
+`systems/market.ts`). This is a farm-market forecast layer, not a
+trading/investment sim — there is no buying/selling of market assets, no
+intraday ticking, and no permanent Visual Variety names invented for it.
+
+An **undiscovered** Visual Variety has no entry at all and is completely
+absent from every Market surface — no silhouette, no "???" placeholder. A
+**discovered** one gets a `VisualMarketEntry`:
+
+```
+{ visualId, pct, trend: 'RISING' | 'STABLE' | 'FALLING', history: { day, pct }[] }
+```
+
+`pct` is percent above/below baseline (`0` = baseline = a 1.00x multiplier);
+`history` is oldest-first and capped to `TUNING.MARKET_HISTORY_DAYS` (5)
+entries. The multiplier actually used for pricing is `1 + pct`
+(`marketMultiplierForVisual`).
+
+**Daily update** (`advanceDailyMarket`, called once per day from
+`Game.advanceDayInternal`, strictly after `state.day` is incremented — never
+from `loadState`, so a reload can never cause a second same-day update):
+every currently DISCOVERED visualId's `pct` moves by
+
+```
+dailyMovement = randomNoise + trendBias + meanReversion + eventShock
+nextPct = clamp(pct + dailyMovement, MARKET_PCT_MIN, MARKET_PCT_MAX)
+```
+
+- `randomNoise` — uniform ±`MARKET_NOISE_AMPLITUDE` (±6%).
+- `trendBias` — ±`MARKET_TREND_BIAS` (±2.5%) from the entry's *currently
+  displayed* trend (RISING/FALLING; 0 for STABLE) — this is what makes
+  trend prediction real: RISING gives tomorrow a genuine positive
+  statistical bias and FALLING a genuine negative one, but neither
+  guarantees the direction, since the ±6% noise term is larger than the
+  ±2.5% bias and can still overcome it on any given day.
+- `meanReversion` — `-pct * MARKET_REVERSION_RATE` (15% of the current
+  distance from baseline, pulled back every day), which keeps prices from
+  drifting away permanently and is what "prices remain inside the chosen
+  safe bounds" is proven against alongside the explicit clamp.
+- `eventShock` — see Calendar integration below.
+
+The day's own resulting delta (`nextPct - pct`) is then reclassified into
+the *newly displayed* trend (`RISING` if `delta > MARKET_TREND_THRESHOLD`
+(2%), `FALLING` if `< -MARKET_TREND_THRESHOLD`, else `STABLE`) — which is
+what biases the *following* day's movement. `MARKET_PCT_MIN`/`MAX` (-50%/
++60%) are the safe clamp bounds, so the multiplier never leaves 0.50x–1.60x.
+
+**Discovery**: the moment `Game.resolveBreeding()` adds a new visualId to
+`discoveredVisualIds`, it also creates a matching `VisualMarketEntry` via
+`initVisualMarketEntry` — baseline (`pct: 0`), `STABLE`, one history point
+stamped with the current day, and deliberately **no** random move yet
+("one update per game day" — its first real movement happens at the next
+day transition, same as every other discovered variety).
+
+**Calendar integration / limitation**: `WEEK1_CALENDAR`'s existing scripted
+market events (`DayDef.scriptedMarket`, e.g. Day 2's Yellow +30%, Day 6's
+Purple +40%/Striped +25%) are keyed by genetic Color/Pattern, which has no
+unambiguous mapping onto a Visual Variety's illustration id — a C1 apple can
+be bred in any color, so "which visualIds are Yellow" isn't a derivable
+fact, and inventing that mapping would be fabricating content the data
+model doesn't actually support. Rather than fabricate it, V1 reuses only
+the *sign* of the day's existing scripted values
+(`eventShockSignForDay`) and applies one shared, smaller
+`MARKET_EVENT_SHOCK` (±12%) uniformly to every discovered Visual Variety on
+that day — a temporary daily shock only (folded into that one day's
+`dailyMovement`), never a permanent baseline rewrite. This is a deliberate,
+documented V1 scope limitation, not a bug; a real per-Visual-Variety event
+system is future work if it's ever wanted.
+
+**Economy integration**: `priceHarvestedApple` (`systems/economy.ts`) is
+unchanged in shape — apple quality (effective Sweetness/Size) × Market
+multiplier × shipping multiplier — except the Market multiplier now comes
+from `marketMultiplierForVisual(variety.visualId, state.visualMarket)`
+instead of the old color/pattern `marketModifiers` bridge (removed
+entirely, along with `computeMarketForDay`/`generateMildMarket`/
+`describeTopModifier`). Because pricing still happens once, at harvest time,
+and is locked into the `ProcessingItem` in the Shipping Pipeline, a Market
+change on a later day never retroactively reprices an apple already in the
+queue. Operating Cost and the Gross/Net day-log accounting are untouched by
+this pass.
+
+**UI**: a weather-report-style overview (`ui/MarketScreen.ts`,
+`openMarketOverview`) shows one card per discovered Visual Variety — apple
+image, catalog identity (`COMMON · #001` etc, never the internal
+`visualId`), today's `+X%`/`-X%` vs baseline, a RISING/STABLE/FALLING badge,
+and a self-normalized ~5-day sparkline. It's opened from the existing HUD
+Market headline (a small interactive zone over that text, no new
+bottom-nav tab, no HUD reorder) rather than a dedicated screen — the
+smallest V1 access path, reusable/replaceable during the future Orchard/
+global UI redesign. The headline itself (`HUD.ts`) is deterministic:
+whichever discovered variety currently has the largest `|pct|`
+(`strongestMover`), e.g. `Market: #005 +18% ▸`, or `Market: steady ▸` when
+nothing is moving.
+
+**Save migration**: old saves have no `visualMarket` at all (the old
+color/pattern `marketModifiers` bridge isn't semantically convertible to
+per-Visual-Variety prices, so no mapping is attempted). `migrateState`
+initializes a fresh baseline/STABLE entry for every currently
+`discoveredVisualIds` entry the save already has, then normal daily updates
+proceed from the next day transition onward — identical in spirit to how a
+freshly discovered variety initializes.
+
 ## Farmland & Upgrades
 
 - Field 2: $300 (purchasable from Day 2). Field 3: $850. Field 4: $1800.
@@ -468,7 +575,7 @@ resets `closing = false` too, defensively, alongside the existing
 `dayEnded = false` reset).
 
 Not yet implemented (still future work, see Planned direction below):
-Market V1, the Orchard/global HUD redesign (including the approved
+the Orchard/global HUD redesign (including the approved
 DAY/TIME → MARKET → NEXT CONTEST → MONEY → END DAY ordering), morning
 fades/rooster audio/page-flip transitions, and Freshness.
 
@@ -600,18 +707,74 @@ this is built yet — recorded here so intent survives until each piece is
 actually implemented. Update each subsection into the relevant section above
 (and remove it from here) once it ships.
 
-### Market V1
+### Orchard Mutation / Breeding Specimen / Breed connection
 
-Every DISCOVERED Visual Variety (not individual Lines — see Visual Rarity
-above) gets one market-price update per game day; price is per Visual
-Variety, never per individual owned Line. The Market screen presents
-discovered varieties like a weather-report overview: image / catalog
-identity / today's +/- change / trend, keeping roughly 5 days of compact
-price history. RISING / STABLE / FALLING trends have real predictive
-influence on the next daily move, but never guarantee it; prices have
-long-term pull back toward baseline, and Calendar events (see Calendar
-above) can create larger temporary moves. UNDISCOVERED varieties remain
-hidden/unknown.
+Not implemented yet — recorded here as the next CORE gameplay pass, ahead of
+the UI redesign. Playtesting surfaced a structural weakness: Orchard
+harvesting and Breed currently feel disconnected. The player starts with two
+permanent Library Lines and can breed those same Lines indefinitely, so
+harvesting apples doesn't feel like it directly supplies meaningful breeding
+material. The approved fix is a new loop:
+
+```
+Orchard mutation / special fruit → Breeding Specimen → Breed → KEEP → permanent Owned Line
+```
+
+This introduces a third concept, deliberately distinct from the two that
+already exist:
+
+- **DISCOVERED** — the Visual Variety has been seen and can appear in
+  systems like Market/Collection (existing behavior, unchanged — see Visual
+  Rarity and Market V1 above).
+- **SPECIMEN** (new) — the player physically obtained one particular
+  special apple from the Orchard: temporary, tangible, one-use breeding
+  material, usable directly as a Breed parent and consumed when used.
+- **OWNED LINE** — a permanent Library Line, normally created by KEEPing an
+  offspring (existing behavior, unchanged).
+
+Approved conceptual direction: occasionally an Orchard fruit slot can
+visibly show a different Visual Variety than the field's planted Line —
+meant to read as "I personally found an unusual apple on this tree," not as
+a silent Collection unlock. Harvesting that specific fruit gives a tangible
+one-use Breeding Specimen rather than merely flagging a new Discovery. That
+Specimen can later be selected directly as a Breed parent and is consumed
+when bred; if the resulting offspring is KEPT, the player has converted a
+temporary find into a permanent Owned Line. The goal is to make "I
+personally found this rare apple" matter directly in breeding gameplay,
+connecting Orchard play to Breed rather than adding another encyclopedia
+entry.
+
+**Guaranteed early Orchard specimens (approved onboarding requirement for
+this pass, not yet implemented):** these exist purely so the player
+definitely experiences Orchard → unusual apple → harvest → Specimen → Breed
+at least twice early on, without relying on RNG.
+
+- **Day 1** — guarantee exactly one Green Visual specimen, **COMMON · #002**,
+  through the future Specimen system. #002 is already part of the initial
+  visual set (it's `STARTER_GREEN`'s own visualId) and may already be
+  owned, so this is deliberately *not* a new-visual unlock — its purpose is
+  the low-risk tutorial: teaching that a visibly different individual apple
+  can appear on the tree, can be harvested as itself, and becomes tangible
+  breeding material.
+- **Day 2** — guarantee exactly one specimen of **COMMON · #003 OR
+  COMMON · #004** — the player's first guaranteed specimen from outside the
+  initial red/green visual set, establishing that genuinely new Visual
+  Varieties (not just already-known ones) can be physically found in the
+  Orchard and carried into breeding. Whether #003 vs #004 is random,
+  predetermined, or planted-Line-dependent is explicitly undecided — left
+  to the Specimen design pass.
+- **Day 3 onward** — no more guaranteed daily drops. Specimen/mutation
+  appearances become probability-based from here on, and Rare/Epic
+  specimens must still respect their existing day-gated unlock progression
+  (Rare from Day 4, Epic from Day 6 — see Visual Rarity above). The actual
+  Day-3+ probabilities are explicitly undecided — to be designed together
+  with Specimen stat generation, visual inheritance, Breed A/B/C/D
+  behavior, and Rare/Epic preservation rules, before implementation.
+
+Explicitly out of scope for this recorded direction (design-only, no code):
+Specimen stat generation, visual inheritance rules, Breed A/B/C/D specimen
+behavior, Rare/Epic preservation rules, Day-3+ probabilities, and Specimen
+UI. None of this has been implemented.
 
 ### Orchard / global UI redesign
 
@@ -641,20 +804,24 @@ once this redesign happens — it isn't placeholder-only anymore.
 
 ### Revised priority order
 
-Shipping Pipeline, Day Cycle, and Daily Operating Cost are done (see their
-sections above) — remaining order:
+Shipping Pipeline, Day Cycle, Daily Operating Cost, and Market V1 are done
+(see their sections above) — remaining order:
 
-1. Market V1
+1. Orchard Mutation / Breeding Specimen / Breed connection
 2. Orchard / global UI redesign
 3. Freshness integration
 4. Collection / Library / Replant cleanup
-5. Orchard mutation-fruit discoveries
-6. Final art / animation / sound / font polish
+5. Final art / animation / sound / font polish
 
-Market moved ahead of the UI redesign: the prototype already has a
-reasonably engaging core loop, and the next important open question is
+Market V1 was deliberately built ahead of the UI redesign: the prototype
+already had a reasonably engaging core loop, and the open question was
 whether each new day creates a genuinely different decision. Operating Cost
-now adds economic pressure; Market V1 is what turns that into real
-day-to-day decision-making (when to sell, what to grow). The full visual
-redesign should follow once that real data/systems layer exists, not
-precede it.
+added economic pressure; Market V1 is what turns that into real day-to-day
+decision-making (when to sell, what to grow).
+
+Mutation-fruit discovery is no longer a small late-game feature — it's now
+promoted ahead of the visual redesign because it directly connects Orchard →
+Harvest → Discovery → Breed → Line ownership (see Orchard Mutation /
+Breeding Specimen / Breed connection above), fixing the structural
+disconnect playtesting surfaced between harvesting and breeding. The full
+visual redesign follows once that connective loop exists, not before.

@@ -1,6 +1,7 @@
 import { TUNING } from '../tuning.ts';
 import type { DayLogEntry, GameState, Variety } from '../types.ts';
 import { activeSlotIndices, allSlotsActive, makeInitialFruitSlots } from './economy.ts';
+import { initVisualMarketEntry } from './market.ts';
 import { freshStarterLines, STARTER_GREEN } from './starterLines.ts';
 
 export function saveState(state: GameState): void {
@@ -35,6 +36,22 @@ function backfillLineFields(variety: Partial<Variety> & { name?: string }): void
 
 function migrateState(state: GameState): void {
   if (!state.discoveredVisualIds) state.discoveredVisualIds = ['C1', 'C2'];
+
+  // Market V1 replaces the old temporary color/pattern-based
+  // marketModifiers bridge with per-Visual-Variety Market state. Old saves
+  // have no `visualMarket` at all (or it may be missing entries for a
+  // visualId discovered after the save was last written) — there is no
+  // unambiguous mapping from the old bridge's values onto this new
+  // per-visual shape, so per PROJECT.md's migration guidance every
+  // currently DISCOVERED Visual Variety is simply initialized safely at
+  // baseline/STABLE and begins normal Market updates from the next day
+  // transition onward, exactly like a freshly discovered variety would.
+  if (typeof state.visualMarket !== 'object' || state.visualMarket === null) {
+    state.visualMarket = {} as GameState['visualMarket'];
+  }
+  for (const visualId of state.discoveredVisualIds) {
+    if (!state.visualMarket[visualId]) state.visualMarket[visualId] = initVisualMarketEntry(visualId, state.day);
+  }
 
   // Saves from before the Library pass may have no library at all (or an
   // empty one) — seed the same two starting Lines a brand-new game gets,

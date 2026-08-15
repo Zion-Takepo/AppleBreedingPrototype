@@ -93,9 +93,20 @@ export const TUNING = {
   APPLE_VALUE_SWEETNESS_MULT: 0.01,
   APPLE_VALUE_SIZE_MULT: 0.005,
 
-  MARKET_MULTIPLIER_CAP: 1.6,
-  MARKET_MILD_MIN: -0.15,
-  MARKET_MILD_MAX: 0.4,
+  // Market V1 — per-Visual-Variety pricing, one update per game day (see
+  // PROJECT.md Market V1 and systems/market.ts advanceVisualMarket):
+  //   dailyMovement = noise + trendBias + meanReversion + eventShock
+  // clamped to [MARKET_PCT_MIN, MARKET_PCT_MAX], then that day's own delta
+  // is reclassified into RISING/STABLE/FALLING, which biases the FOLLOWING
+  // day's movement (a real but non-guaranteed nudge).
+  MARKET_NOISE_AMPLITUDE: 0.06, // uniform +/-6% random daily noise
+  MARKET_TREND_BIAS: 0.025, // +/-2.5% nudge from yesterday's displayed trend
+  MARKET_REVERSION_RATE: 0.15, // pulls 15% of the current distance-from-baseline back toward 0 each day
+  MARKET_EVENT_SHOCK: 0.12, // +/-12% shared shock applied to every discovered variety on a scripted Calendar market-event day (see market.ts eventShockSignForDay)
+  MARKET_TREND_THRESHOLD: 0.02, // a day's own delta must exceed this magnitude to register as RISING/FALLING rather than STABLE
+  MARKET_PCT_MIN: -0.5, // safe clamp floor: multiplier never below 0.50x
+  MARKET_PCT_MAX: 0.6, // safe clamp ceiling: multiplier never above 1.60x
+  MARKET_HISTORY_DAYS: 5,
 
   CONTEST_DAY4: {
     day: 4,

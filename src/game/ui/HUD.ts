@@ -1,8 +1,10 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
+import { APPLE_CATALOG_NUMBER } from '../render/appleAssets.ts';
 import { getDayDef, nextEvent } from '../systems/calendar.ts';
 import { gameClockLabel } from '../systems/clock.ts';
-import { describeTopModifier } from '../systems/market.ts';
+import { formatMarketPct, strongestMover } from '../systems/market.ts';
+import { openMarketOverview } from './MarketScreen.ts';
 import { LAYOUT, THEME } from './theme.ts';
 import { Button, formatMoney, text as mkText } from './uiKit.ts';
 
@@ -45,6 +47,16 @@ export class HUD extends Phaser.GameObjects.Container {
     this.marketText = mkText(scene, 560, y, '', 24, THEME.textLight).setOrigin(0, 0.5);
     this.eventText = mkText(scene, 940, y, '', 24, '#cfe8c8').setOrigin(0, 0.5);
     this.add([this.dayText, this.timerText, this.cashText, this.marketText, this.eventText]);
+
+    // Market V1's smallest access path: the existing HUD Market headline
+    // opens the Market overview modal directly — no new bottom-nav tab, no
+    // HUD reorder (see PROJECT.md "How to access Market"). Zone sized to
+    // cover the headline's text run without encroaching on cashText/
+    // eventText's own hit areas.
+    const marketZone = scene.add.zone(550, 0, 370, LAYOUT.hudHeight).setOrigin(0, 0);
+    marketZone.setInteractive();
+    marketZone.on('pointerdown', () => openMarketOverview(scene, game));
+    this.add(marketZone);
 
     this.shipmentText = mkText(scene, SHIPMENT_FEEDBACK_X, SHIPMENT_FEEDBACK_Y, '', 20, '#2f5a20', true, true).setOrigin(0, 0);
     this.shipmentText.setAlpha(0);
@@ -107,8 +119,17 @@ export class HUD extends Phaser.GameObjects.Container {
     }
     this.cashText.setText(`$${formatMoney(s.cash)}`);
 
-    const marketDesc = describeTopModifier(s.marketModifiers);
-    this.marketText.setText(marketDesc ? `Market: ${marketDesc}` : '');
+    // Deterministic headline from the actual Market V1 state: the strongest
+    // notable mover among currently DISCOVERED Visual Varieties (see
+    // systems/market.ts strongestMover). Catalog number only — never the
+    // internal visualId.
+    const mover = strongestMover(s.visualMarket, s.discoveredVisualIds);
+    if (!mover || Math.abs(mover.pct) < 0.005) {
+      this.marketText.setText('Market: steady ▸');
+    } else {
+      const num = String(APPLE_CATALOG_NUMBER[mover.visualId]).padStart(3, '0');
+      this.marketText.setText(`Market: #${num} ${formatMarketPct(mover.pct)} ▸`);
+    }
 
     const def = getDayDef(s.day);
     if (def && def.event !== 'NONE') {

@@ -19,7 +19,7 @@ import {
   priceHarvestedApple,
   sweetnessContestScore,
 } from './systems/economy.ts';
-import { computeMarketForDay } from './systems/market.ts';
+import { advanceDailyMarket, initVisualMarket, initVisualMarketEntry } from './systems/market.ts';
 import { clearSave, loadState, saveState } from './systems/save.ts';
 import { freshStarterLines, STARTER_GREEN, STARTER_RED } from './systems/starterLines.ts';
 
@@ -70,7 +70,10 @@ function createInitialState(): GameState {
     },
     irrigationLevel: 0,
     shippingLevel: 0,
-    marketModifiers: computeMarketForDay(1),
+    // Day 1 starts every already-discovered Visual Variety safely at
+    // baseline/STABLE — its first real Market update happens at the Day
+    // 1->2 transition (see advanceDayInternal), never here.
+    visualMarket: initVisualMarket(['C1', 'C2'], 1),
     totalRevenue: 0,
     contestResults: [],
     day4ContestDone: false,
@@ -318,6 +321,10 @@ export class Game {
     for (const visualId of result.newlyDiscoveredVisualIds) {
       if (!this.state.discoveredVisualIds.includes(visualId)) {
         this.state.discoveredVisualIds.push(visualId);
+        // Every newly discovered Visual Variety automatically gains Market
+        // state, safely at baseline/STABLE — see initVisualMarketEntry's
+        // doc comment for why it deliberately gets no random move yet.
+        this.state.visualMarket[visualId] = initVisualMarketEntry(visualId, this.state.day);
         discoveredSomething = true;
       }
     }
@@ -780,7 +787,12 @@ export class Game {
     this.state.dayActive = true;
     this.state.dayEnded = false;
     this.state.closing = false;
-    this.state.marketModifiers = computeMarketForDay(this.state.day);
+    // ONE Market update per game day, for every currently DISCOVERED Visual
+    // Variety (see systems/market.ts advanceDailyMarket) — belongs to this
+    // day transition, not a realtime ticker, and never runs again until the
+    // next transition (a reload can't trigger a second same-day update
+    // since this method only runs from proceedToNextDay/startNextWeek).
+    advanceDailyMarket(this.state.visualMarket, this.state.discoveredVisualIds, this.state.day);
     this.state.dayHarvestRevenue = 0;
     this.state.dayMarketBonus = 0;
     this.state.dayContestPrize = 0;

@@ -1,5 +1,6 @@
 import { TUNING } from '../tuning.ts';
-import type { CultivationPolicy, Field, FieldFruitSlot, GameState, MarketModifiers, Variety } from '../types.ts';
+import type { CultivationPolicy, Field, FieldFruitSlot, GameState, Variety } from '../types.ts';
+import { marketMultiplierForVisual } from './market.ts';
 
 export function effectiveStats(variety: Variety, policy: CultivationPolicy): { sweetness: number; size: number } {
   let sweetness = variety.sweetness;
@@ -7,13 +8,6 @@ export function effectiveStats(variety: Variety, policy: CultivationPolicy): { s
   if (policy === 'SWEETEN') sweetness = Math.min(100, sweetness + TUNING.CULTIVATION.SWEETEN.sweetnessBonus);
   if (policy === 'GROW_BIG') size = Math.min(100, size + TUNING.CULTIVATION.GROW_BIG.sizeBonus);
   return { sweetness, size };
-}
-
-export function marketMultiplierFor(variety: Variety, modifiers: MarketModifiers): number {
-  const colorMod = modifiers[variety.color] ?? 0;
-  const patternMod = modifiers[variety.pattern] ?? 0;
-  const combined = 1 + colorMod + patternMod;
-  return Math.min(TUNING.MARKET_MULTIPLIER_CAP, combined);
 }
 
 export function shippingMultiplier(shippingLevel: number): number {
@@ -35,8 +29,9 @@ export function baseAppleValue(sweetness: number, size: number): number {
 
 /**
  * Prices exactly one apple at the moment it's harvested, using *effective*
- * (cultivation-adjusted) Sweetness/Size plus the current market + shipping
- * modifiers. The caller locks this result into the apple's ProcessingItem
+ * (cultivation-adjusted) Sweetness/Size plus the current per-Visual-Variety
+ * Market multiplier (see systems/market.ts) and shipping multiplier. The
+ * caller locks this result into the apple's ProcessingItem
  * permanently — later changes to cultivation, variety, or market never
  * retroactively reprice an apple already in the Shipping/Processing Queue.
  *
@@ -57,7 +52,7 @@ export function baseAppleValue(sweetness: number, size: number): number {
 export function priceHarvestedApple(variety: Variety, field: Field, state: GameState): PricedApple {
   const { sweetness, size } = effectiveStats(variety, field.policy);
   const perApple = baseAppleValue(sweetness, size);
-  const marketMult = marketMultiplierFor(variety, state.marketModifiers);
+  const marketMult = marketMultiplierForVisual(variety.visualId, state.visualMarket);
   const shipMult = shippingMultiplier(state.shippingLevel);
   const baseValue = perApple * shipMult;
   const value = baseValue * marketMult;
