@@ -13,6 +13,7 @@ export function showEndDaySummary(scene: Phaser.Scene, log: DayLogEntry, isLastD
   const rows: [string, number | null][] = [
     ['Harvest Revenue', log.harvestRevenue],
     ['Market Bonus', log.marketBonus],
+    ['Freshness Loss', -log.freshnessLoss],
     ['Contest Prize', log.contestPrize],
     ['Operating Cost', -log.operatingCost],
   ];

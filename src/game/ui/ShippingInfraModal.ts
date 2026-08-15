@@ -57,6 +57,13 @@ export function openShippingInfraModal(scene: Phaser.Scene, game: Game): void {
     buy: () => game.buyShippingSpeedUpgrade(),
   });
 
+  // Small explanatory sentence connecting genetics to infrastructure (see
+  // PROJECT.md "Freshness" section 14) — no new tab/inspector, just this
+  // one line under the two tracks.
+  modal.root.add(
+    mkText(scene, modal.x + MODAL_W / 2, modal.y + MODAL_H - 34, 'Freshness protects apple value while waiting in Packing.', 16, THEME.textMid).setOrigin(0.5),
+  );
+
   const refreshAll = () => {
     packingElems.refresh();
     speedElems.refresh();

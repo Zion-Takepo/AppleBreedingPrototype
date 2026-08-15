@@ -28,6 +28,7 @@ import {
   sweetnessContestScore,
 } from './systems/economy.ts';
 import { advanceDailyMarket, initVisualMarket, initVisualMarketEntry } from './systems/market.ts';
+import { realizedShippingValue } from './systems/freshness.ts';
 import { clearSave, loadState, saveState } from './systems/save.ts';
 import { freshStarterLines, STARTER_GREEN, STARTER_RED } from './systems/starterLines.ts';
 import {
@@ -114,6 +115,7 @@ function createInitialState(): GameState {
     dayHarvestRevenue: 0,
     dayMarketBonus: 0,
     dayContestPrize: 0,
+    dayFreshnessLoss: 0,
     highestSweetnessEver: Math.max(STARTER_RED.sweetness, STARTER_GREEN.sweetness),
     largestSizeEver: Math.max(STARTER_RED.size, STARTER_GREEN.size),
     hasUnseenDiscovery: false,
@@ -288,30 +290,50 @@ export class Game {
       // speed multiplier — ship several ready apples in one tick, each still
       // emitting its own 'shipment' event exactly as if shipped individually.
       if (this.state.processingQueue.length > 0) {
+        // Freshness V1 (see PROJECT.md "Freshness"): EVERY item in the
+        // queue ages while the farm simulation genuinely runs, not just the
+        // head — this whole block only executes when !pauseFarmSimulation
+        // (Breed's strategic pause), so a queued apple never loses value
+        // while the player is merely thinking on the BREED screen, and
+        // there is no catch-up delta on resuming since the wait simply
+        // wasn't advanced meanwhile. Continues advancing during Closing
+        // (state.closing) exactly the same way, since Closing never sets
+        // pauseFarmSimulation.
+        for (const item of this.state.processingQueue) item.packingWaitSeconds += dtSeconds;
+
         this.state.processingTimer -= dtSeconds;
         while (this.state.processingTimer <= 0 && this.state.processingQueue.length > 0) {
           const item = this.state.processingQueue.shift()!;
+          // Freshness retention is applied to the item's already-locked
+          // harvest value right here, at Shipping realization time — never
+          // earlier. `realizedValue` (not the locked `item.value`) is what
+          // the player actually receives; the difference is tracked as
+          // Freshness Loss (see PROJECT.md "Freshness" section 10).
+          const realizedValue = realizedShippingValue(item.value, item.freshness, item.packingWaitSeconds);
+          const freshnessLoss = item.value - realizedValue;
           // Cash/totalRevenue are always paid — this money was genuinely
-          // earned the instant the apple was harvested/priced, regardless of
-          // day state. dayHarvestRevenue/dayMarketBonus, however, exist only
-          // to feed the CURRENT day's settlement snapshot (finishClosing) and
-          // get reset to 0 on the next advanceDayInternal(); once the day is
-          // already settled (dayEnded) that snapshot has already been taken
-          // and shown, so continuing to add to them here would just leak
-          // revenue that never appears in any summary. During Closing itself
+          // earned (after Freshness) the instant the apple shipped,
+          // regardless of day state. dayHarvestRevenue/dayMarketBonus/
+          // dayFreshnessLoss, however, exist only to feed the CURRENT day's
+          // settlement snapshot (finishClosing) and get reset to 0 on the
+          // next advanceDayInternal(); once the day is already settled
+          // (dayEnded) that snapshot has already been taken and shown, so
+          // continuing to add to them here would just leak revenue/loss
+          // that never appears in any summary. During Closing itself
           // dayEnded is still false (it only flips true once the queue is
           // fully drained — see finishClosing below), so Final Shipment
-          // revenue is correctly still counted into the closing day's own
-          // summary, never the next day's.
-          this.state.cash += item.value;
-          this.state.totalRevenue += item.value;
+          // revenue/loss is correctly still counted into the closing day's
+          // own summary, never the next day's.
+          this.state.cash += realizedValue;
+          this.state.totalRevenue += realizedValue;
           if (!this.state.dayEnded) {
             this.state.dayHarvestRevenue += item.baseValue;
             this.state.dayMarketBonus += item.value - item.baseValue;
+            this.state.dayFreshnessLoss += freshnessLoss;
           }
           // Exact, unrounded value — the HUD feedback now displays money to
           // two decimal places, so no rounding belongs here (see HUD.ts).
-          this.emit({ type: 'shipment', fieldId: item.fieldId, revenue: item.value });
+          this.emit({ type: 'shipment', fieldId: item.fieldId, revenue: realizedValue });
           changed = true;
           this.state.processingTimer += this.processingCadenceSeconds();
         }
@@ -620,7 +642,13 @@ export class Game {
     }
 
     const { value, baseValue } = priceHarvestedApple(variety, field, this.state);
-    this.state.processingQueue.push({ fieldId, value, baseValue });
+    // Freshness V1: the apple's exact genetic Freshness is frozen here,
+    // alongside its Market-adjusted value, the instant it enters the queue —
+    // never re-derived later from whatever Line currently happens to be
+    // planted (see PROJECT.md "Freshness" section 4). Packing wait starts
+    // at 0 and only advances once this item is actually sitting in the
+    // queue (see update()).
+    this.state.processingQueue.push({ fieldId, value, baseValue, freshness: variety.freshness, packingWaitSeconds: 0 });
     // Only (re)arm the timer when the queue was empty — an apple arriving
     // behind others already in line must not reset the head's remaining
     // processing time.
@@ -1083,31 +1111,48 @@ export class Game {
    */
   private finishClosing(): void {
     // dayHarvestRevenue/dayMarketBonus accumulate exact, unrounded per-apple
-    // dollars all day (see priceHarvestedApple); dayContestPrize is always
-    // an exact whole-dollar amount (see the CONTEST_DAY4/FAIR_DAY7 prize
-    // tables). Round the shipment total to the nearest CENT (not whole
+    // LOCKED dollars all day (see priceHarvestedApple) — i.e. before
+    // Freshness decay; dayFreshnessLoss (see PROJECT.md "Freshness" section
+    // 10) is the exact, unrounded sum of what Freshness decay took back out
+    // of those same shipments; dayContestPrize is always an exact
+    // whole-dollar amount (see the CONTEST_DAY4/FAIR_DAY7 prize tables).
+    // Round the LOCKED shipment total to the nearest CENT (not whole
     // dollar) once, then derive harvestRevenue by rounding just that
     // component and marketBonus as the remainder, so the two displayed line
-    // items always sum exactly to the rounded whole.
-    const dayShipmentRevenue = this.state.dayHarvestRevenue + this.state.dayMarketBonus;
-    const combinedCents = Math.round(dayShipmentRevenue * 100);
+    // items always sum exactly to the rounded locked whole — exactly as
+    // before this pass. Separately round the REALIZED (post-Freshness)
+    // total once too, and derive freshnessLoss as the remainder between the
+    // two rounded totals, so harvestRevenue + marketBonus - freshnessLoss
+    // reconciles to the rounded realized total exactly, to the cent, by the
+    // same "round once, derive the rest as a remainder" construction used
+    // throughout this method — never two independently-rounded figures that
+    // could disagree by a cent.
+    const dayShipmentRevenueLocked = this.state.dayHarvestRevenue + this.state.dayMarketBonus;
+    const dayShipmentRevenueRealized = dayShipmentRevenueLocked - this.state.dayFreshnessLoss;
+    const combinedLockedCents = Math.round(dayShipmentRevenueLocked * 100);
     const harvestRevenueCents = Math.round(this.state.dayHarvestRevenue * 100);
-    const marketBonusCents = combinedCents - harvestRevenueCents;
+    const marketBonusCents = combinedLockedCents - harvestRevenueCents;
     const harvestRevenue = harvestRevenueCents / 100;
     const marketBonus = marketBonusCents / 100;
+    const combinedRealizedCents = Math.round(dayShipmentRevenueRealized * 100);
+    const freshnessLossCents = combinedLockedCents - combinedRealizedCents;
+    const freshnessLoss = freshnessLossCents / 100;
     const contestPrize = this.state.dayContestPrize;
 
     const operatingCostAmount = operatingCost(this.state.day, this.unlockedFields().length);
-    const net = harvestRevenue + marketBonus + contestPrize - operatingCostAmount;
+    const net = harvestRevenue + marketBonus - freshnessLoss + contestPrize - operatingCostAmount;
 
-    // `cash` has been accumulating today's exact, unrounded shipment/
-    // contest revenue in real time all day (see update()'s Shipping drain
-    // and the contest-submission methods) — full fractional precision is
-    // preserved there deliberately, and untouched by this pass. Here, at
-    // the one settlement boundary per day, subtract that exact raw revenue
-    // back out and replace it with `net` — built from the exact same
-    // rounded harvestRevenue/marketBonus/contestPrize figures the summary
-    // above displays — so the displayed cash change for this settlement is
+    // `cash` has been accumulating today's exact, unrounded REALIZED
+    // (post-Freshness) shipment revenue in real time all day, plus contest
+    // revenue (see update()'s Shipping drain and the contest-submission
+    // methods) — full fractional precision is preserved there deliberately,
+    // and untouched by this pass beyond paying `realizedValue` instead of
+    // the locked `item.value` per shipment. Here, at the one settlement
+    // boundary per day, subtract that exact raw REALIZED revenue
+    // (dayShipmentRevenueRealized, not the locked total) back out and
+    // replace it with `net` — built from the exact same rounded
+    // harvestRevenue/marketBonus/freshnessLoss/contestPrize figures the
+    // summary above displays — so the displayed cash change for this settlement is
     // guaranteed to equal displayed Net to the cent BY CONSTRUCTION (both
     // derive from the identical rounded numbers), not merely "usually":
     // independently re-rounding a separately-accumulated cash total here
@@ -1120,13 +1165,14 @@ export class Game {
     // economy inputs are nowhere near that boundary) — it never touches
     // whatever ELSE moved cash today (Field/Irrigation/Shipping purchases,
     // breeding costs — already exact whole-dollar amounts).
-    const nonRevenueCash = Math.round((this.state.cash - dayShipmentRevenue - contestPrize) * 100) / 100;
+    const nonRevenueCash = Math.round((this.state.cash - dayShipmentRevenueRealized - contestPrize) * 100) / 100;
     this.state.cash = nonRevenueCash + net;
 
     const log: DayLogEntry = {
       day: this.state.day,
       harvestRevenue,
       marketBonus,
+      freshnessLoss,
       contestPrize,
       operatingCost: operatingCostAmount,
       net,
@@ -1167,6 +1213,7 @@ export class Game {
     this.state.dayHarvestRevenue = 0;
     this.state.dayMarketBonus = 0;
     this.state.dayContestPrize = 0;
+    this.state.dayFreshnessLoss = 0;
     // Handles the Day 1->2 transition spawning the Day-2 guarantee
     // immediately (rather than only on the next reload) — safe/idempotent
     // on every other day transition since it's gated on day===1/day===2.

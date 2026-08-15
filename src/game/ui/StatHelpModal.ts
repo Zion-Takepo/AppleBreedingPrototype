@@ -6,8 +6,8 @@ import { createModal } from './modals.ts';
 // Plain-English explanations of the five genetic stats — shown from a
 // reusable "i" info button on both the Breed parent-selection screen and
 // the offspring-result/candidate-selection screen (see PROJECT.md
-// "Five-stat info button"). Deliberately does NOT claim Freshness already
-// affects value — it doesn't yet.
+// "Five-stat info button"). Freshness V1 gameplay meaning only — the exact
+// formula/tuning constants are deliberately not exposed here.
 const STAT_INFO: { label: string; description: string }[] = [
   { label: 'SWEETNESS', description: 'Strongly increases value per apple.' },
   { label: 'SIZE', description: 'Makes apples visually larger and gives a smaller increase to value per apple.' },
@@ -19,7 +19,7 @@ const STAT_INFO: { label: string; description: string }[] = [
   {
     label: 'FRESHNESS',
     description:
-      'Currently exists as a genetic stat but has no economic gameplay effect yet. Planned future use: reduce value loss while harvested apples wait for shipping.',
+      'Reduces value loss while harvested apples wait in Packing. Higher Freshness helps apples keep more of their harvest-time value when Shipping is congested.',
   },
 ];
 

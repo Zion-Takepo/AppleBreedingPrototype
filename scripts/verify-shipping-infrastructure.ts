@@ -116,8 +116,15 @@ function runClosing(game: Game): void {
   }
 }
 
+// Freshness V1 (see PROJECT.md "Freshness") gave ProcessingItem two more
+// fields — freshness 50 / packingWaitSeconds 0 here means 0 real-time wait
+// so far, well inside FRESHNESS_GRACE_SECONDS, so a dummy item's realized
+// Shipping value stays exactly equal to its locked `value` for every
+// pre-existing arithmetic check in this suite (it predates Freshness V1 and
+// is intentionally not re-verifying Freshness decay itself — see
+// scripts/verify-freshness.ts for that).
 function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
-  for (let i = 0; i < count; i++) state.processingQueue.push({ fieldId: 1, value, baseValue: value });
+  for (let i = 0; i < count; i++) state.processingQueue.push({ fieldId: 1, value, baseValue: value, freshness: 50, packingWaitSeconds: 0 });
 }
 
 // ===========================================================================
@@ -278,8 +285,8 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   const game = new Game();
   game.state.cash = 200;
   game.state.processingQueue = [
-    { fieldId: 1, value: 3, baseValue: 3 },
-    { fieldId: 1, value: 3, baseValue: 3 },
+    { fieldId: 1, value: 3, baseValue: 3, freshness: 50, packingWaitSeconds: 0 },
+    { fieldId: 1, value: 3, baseValue: 3, freshness: 50, packingWaitSeconds: 0 },
   ];
   game.state.processingTimer = 1.0; // simulate a Lv1-cadence head item already mid-flight
 
@@ -489,7 +496,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
 {
   clearStorage();
   const game = new Game();
-  game.state.processingQueue = [{ fieldId: 1, value: 3, baseValue: 3 }];
+  game.state.processingQueue = [{ fieldId: 1, value: 3, baseValue: 3, freshness: 50, packingWaitSeconds: 0 }];
   game.state.processingTimer = 1.0; // Lv1 normal cadence, freshly started
   game.beginClosing();
   const expectedFinalCadence = finalShipmentCadenceSeconds(game.shippingCadenceSeconds());
@@ -498,7 +505,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
 {
   clearStorage();
   const game = new Game();
-  game.state.processingQueue = [{ fieldId: 1, value: 3, baseValue: 3 }];
+  game.state.processingQueue = [{ fieldId: 1, value: 3, baseValue: 3, freshness: 50, packingWaitSeconds: 0 }];
   game.state.processingTimer = 0.05; // already shorter than Final Shipment cadence
   game.beginClosing();
   assert('an already-shorter remaining head timer is NOT increased at Closing', Math.abs(game.state.processingTimer - 0.05) < 1e-9);
@@ -523,6 +530,14 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   clearStorage();
   const game = new Game();
   clearAllSpecimens(game);
+  // This check predates Freshness V1 and isn't about Freshness at all — it's
+  // about overflow/Operating-Cost/totalRevenue accounting. Max Shipping
+  // Speed keeps the whole 12-item Final Shipment drain comfortably inside
+  // FRESHNESS_GRACE_SECONDS (see PROJECT.md "Freshness"), so every dummy
+  // item ships with 0 Freshness loss and the original "exactly 36" gross
+  // figure this check asserts stays exactly true; Freshness's own decay
+  // math is covered separately by scripts/verify-freshness.ts.
+  game.state.shippingSpeedLevel = 5;
   const field = game.state.fields[0] as Field;
   pushDummyQueueItems(game.state, 12); // guarantee overflow
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);

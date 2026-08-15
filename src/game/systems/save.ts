@@ -121,6 +121,22 @@ function migrateState(state: GameState): void {
   if (!Array.isArray(state.processingQueue)) state.processingQueue = [];
   if (typeof state.processingTimer !== 'number') state.processingTimer = 0;
 
+  // Freshness V1 (see PROJECT.md "Freshness" section 17): a save written
+  // before this pass has queued ProcessingItems with no `freshness`/
+  // `packingWaitSeconds` at all. Per the explicit migration guidance, a
+  // missing `freshness` backfills to a neutral 50 (never fabricates the
+  // apple's real historical genetic Freshness) and a missing
+  // `packingWaitSeconds` backfills to 0 (never retroactively punishes an
+  // old save for unknown historical waiting time). `dayFreshnessLoss`
+  // itself is a fresh running accumulator, safe to default to 0 regardless
+  // of day.
+  for (const item of state.processingQueue) {
+    const legacyItem = item as { freshness?: number; packingWaitSeconds?: number };
+    if (typeof legacyItem.freshness !== 'number') legacyItem.freshness = 50;
+    if (typeof legacyItem.packingWaitSeconds !== 'number') legacyItem.packingWaitSeconds = 0;
+  }
+  if (typeof state.dayFreshnessLoss !== 'number') state.dayFreshnessLoss = 0;
+
   // Saves from before the Shipping Infrastructure pass have no
   // packingCapacityLevel/shippingSpeedLevel at all — both default to Level
   // 1 (see PROJECT.md "Shipping Infrastructure" section 17). Deliberately
@@ -153,6 +169,11 @@ function migrateState(state: GameState): void {
     if (typeof legacyLog.operatingCost !== 'number' && typeof legacyLog.expenses === 'number') {
       legacyLog.operatingCost = legacyLog.expenses;
     }
+    // A settled lastDayLog persisted before Freshness V1 has no
+    // freshnessLoss at all — 0 is exactly correct here (that day genuinely
+    // had none), unlike the queue backfill above which uses a neutral
+    // non-zero default for unknown per-apple state.
+    if (typeof legacyLog.freshnessLoss !== 'number') legacyLog.freshnessLoss = 0;
   }
 
   // Root-cause fix for GREEN BASIC visually showing the red C1 apple: this

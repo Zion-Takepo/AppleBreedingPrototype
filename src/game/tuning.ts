@@ -209,6 +209,16 @@ export const TUNING = {
   // visualId, however many generations deep.
   RARE_MUTATION_AFFINITY_MULTIPLIER: 10,
   EPIC_MUTATION_AFFINITY_MULTIPLIER: 20,
+
+  // Freshness V1 (see PROJECT.md "Freshness" and systems/freshness.ts). A
+  // normal apple's genetic Freshness + accumulated Packing wait time are
+  // locked onto its ProcessingItem the instant it's harvested; Freshness
+  // only ever reduces how much of that already-locked harvest value
+  // survives until it actually ships — it has no effect before harvest.
+  FRESHNESS_GRACE_SECONDS: 2.0, // no loss at all for the first 2s of Packing wait
+  FRESHNESS_BASE_LOSS_PER_SECOND: 0.02, // 2%/s of locked value after grace, at Freshness 0
+  FRESHNESS_MAX_PROTECTION: 0.8, // Freshness 100 cuts the loss rate by 80%
+  FRESHNESS_MAX_LOSS: 0.3, // an apple can never lose more than 30% of its locked value, however long it waits
 } as const;
 
 export const COLORS = ['Red', 'Green', 'Yellow', 'Purple'] as const;

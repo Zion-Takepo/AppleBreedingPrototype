@@ -130,8 +130,11 @@ updates through its normal periodic refresh, so cash visibly rises in small
 increments as apples ship rather than jumping in a lump sum. The
 shipment-box display (bottom-right of the Orchard view, not yet part of the
 future full redesign) now shows live Packing occupancy/capacity and the
-current Shipping cadence — see "Shipping Infrastructure" below. Freshness-
-based queue-time depreciation is intentionally not part of this pass.
+current Shipping cadence — see "Shipping Infrastructure" below. Every queued
+`ProcessingItem` also carries its own frozen `freshness` and accumulating
+`packingWaitSeconds` (see "Freshness" below) — the value a shipment actually
+pays out is that locked value's Freshness-adjusted *realized* amount, not
+the raw locked `value`.
 
 ## Shipping Infrastructure
 
@@ -242,9 +245,129 @@ Closing sequence (Specimens-first, single collection pass, highest-value
 priority, deterministic Field-order tie-break, overflow survival,
 carryover repricing), the Final Shipment cadence formula and its
 Closing-time clamp (both directions), and save migration (default levels,
-preserved/self-draining over-capacity legacy queue). Freshness value decay
-remains explicitly out of scope for this pass — Freshness still has no
-economic effect.
+preserved/self-draining over-capacity legacy queue); `scripts/verify-freshness.ts`
+covers Freshness's own decay/retention math and its integration with this
+system (see "Freshness" below) and was re-run green alongside this suite.
+
+## Freshness
+
+**Implemented (V1).** Freshness protects an apple's already-locked harvest
+value from decaying while it waits in the shared Packing queue — it applies
+**only after harvest**; a ripe apple still on the tree never accumulates
+Packing wait time and never decays. See `src/game/systems/freshness.ts`
+(`freshnessLossFraction`/`freshnessRetention`/`realizedShippingValue`),
+`TUNING.FRESHNESS_*`, and `types.ts`'s `ProcessingItem` doc comment.
+
+**Harvest lock**: the instant a normal apple enters `processingQueue`
+(`Game.harvestFruitSlot`), its `ProcessingItem` freezes both its
+Market-adjusted `value` (unchanged from before this pass — see Shipping
+Pipeline above) and its exact genetic `freshness` (0..100), and starts
+`packingWaitSeconds` at 0. Both are frozen onto the individual queued apple,
+never re-derived later from whichever Line currently happens to be planted —
+replanting, breeding, or a later Market move can never alter an
+already-queued item.
+
+**Formula** (`systems/freshness.ts`), applied at Shipping realization time,
+using the item's own frozen `freshness` and accumulated `packingWaitSeconds`:
+
+```
+freshness01          = clamp(freshness / 100, 0, 1)
+effectiveWaitSeconds  = max(0, packingWaitSeconds - FRESHNESS_GRACE_SECONDS)
+protection            = FRESHNESS_MAX_PROTECTION * freshness01
+lossRatePerSecond      = FRESHNESS_BASE_LOSS_PER_SECOND * (1 - protection)
+lossFraction          = min(FRESHNESS_MAX_LOSS, effectiveWaitSeconds * lossRatePerSecond)
+retention             = 1 - lossFraction
+realizedValue         = lockedHarvestValue * retention
+```
+
+`TUNING.FRESHNESS_GRACE_SECONDS` (2.0s — no loss at all before this),
+`FRESHNESS_BASE_LOSS_PER_SECOND` (0.02 — 2%/s at Freshness 0),
+`FRESHNESS_MAX_PROTECTION` (0.80 — Freshness 100 cuts the loss rate by 80%),
+`FRESHNESS_MAX_LOSS` (0.30 — a locked value can never lose more than 30%,
+however long it waits). Rare/Epic rarity never affects this formula. Exact
+fractional precision is used internally; rounding only happens at display
+time, same as the rest of the money model.
+
+**Queue-age semantics**: every item in `processingQueue` — the head
+currently being timed and everything waiting behind it — ages by
+`dtSeconds` once per frame inside `Game.update()`'s existing farm-simulation
+block (`processingQueue.forEach` ahead of the head's own ship-timer drain),
+so it's already gated by the exact same `pauseFarmSimulation` flag as
+growth/day-clock/Shipping itself: Breed's strategic pause (see "Breeding"
+below) freezes it with no catch-up delta on resume, and Closing/Final
+Shipment keep advancing it exactly like normal Shipping does, since Closing
+never sets that pause flag. Age stops the instant an item leaves the queue
+(ships) and is preserved exactly across save/reload (plain persisted
+per-item state, no derived/recomputed timer).
+
+**Shipping realization**: when an item reaches the front of the queue and
+its ship-timer elapses, `Game.update()` computes `realizedShippingValue`
+from its locked `value`/`freshness`/`packingWaitSeconds`, pays that
+`realizedValue` (not the locked `value`) into `cash`/`totalRevenue`
+unconditionally, and emits the `'shipment'` event with that same
+`realizedValue` — so the HUD's existing `+$X.XX` feedback (`HUD.ts`,
+unchanged) already shows the true realized amount with no separate wiring
+needed. `dayHarvestRevenue`/`dayMarketBonus` keep accumulating the LOCKED
+`baseValue`/`value - baseValue` split exactly as before this pass (guarded
+by `!dayEnded`, unchanged); a new same-guarded accumulator,
+`GameState.dayFreshnessLoss`, sums each shipment's `value - realizedValue`.
+
+**Daily accounting**: `Game.finishClosing()` rounds the day's LOCKED
+shipment total once (as before) to split `harvestRevenue`/`marketBonus`,
+and separately rounds the day's REALIZED shipment total
+(`dayShipmentRevenueLocked - dayFreshnessLoss`) once, deriving
+`DayLogEntry.freshnessLoss` as the remainder between those two rounded
+totals — the same "round once, derive the rest as a remainder" construction
+this method already used for harvestRevenue/marketBonus, now extended so
+`harvestRevenue + marketBonus - freshnessLoss` reconciles to the rounded
+realized total exactly, to the cent. `net = harvestRevenue + marketBonus -
+freshnessLoss + contestPrize - operatingCost` (Operating Cost's own formula
+is unchanged). The `cash` reconciliation subtraction in the same method now
+uses the REALIZED shipment total (matching what was actually paid into
+`cash` in real time this pass), not the locked one.
+
+**End Day summary** (`ui/EndDayModal.ts`): a `Freshness Loss  -$X.XX` row
+sits between Market Bonus and Contest Prize, always shown (including
+exactly $0.00) for row-list consistency with the existing unconditional
+Contest Prize/Operating Cost rows.
+
+**Stat help / Shipping Infrastructure UI**: `ui/StatHelpModal.ts`'s
+FRESHNESS entry now describes the actual V1 gameplay meaning (not the exact
+formula/constants); `ui/ShippingInfraModal.ts` adds one small explanatory
+line ("Freshness protects apple value while waiting in Packing.") under its
+two upgrade tracks.
+
+**Save migration**: a `ProcessingItem` persisted before this pass has
+neither field — `freshness` backfills to a neutral 50 (never fabricates the
+apple's real historical genetic Freshness), `packingWaitSeconds` backfills
+to 0 (never retroactively punishes an old save for unknown historical
+waiting time). `GameState.dayFreshnessLoss` backfills to 0; a persisted
+`lastDayLog` from before this pass backfills `freshnessLoss: 0` (that day
+genuinely had none, unlike the queue backfill's neutral default).
+
+**Strategic relationships** (unchanged intent, now all connected): Yield
+pressures Packing Capacity; Growth pressures Shipping throughput; Packing
+Capacity lets the farm hold more at once but can lengthen queues; Shipping
+Speed reduces Packing wait time directly; Freshness reduces the financial
+penalty of whatever wait time remains. None of the five is made irrelevant
+by this pass.
+
+Verification: `scripts/verify-freshness.ts` — the decay/retention formula
+(grace period, exact percentages at Freshness 0/50/100, the 30% loss
+cap/70% retention floor, monotonicity in both Freshness and wait time,
+0..100 clamping), harvest-time locking (frozen freshness/value, wait
+starting at 0, immunity to later Market/Line changes), queue-age semantics
+(head and waiting items both age, Breed-pause freeze with no catch-up,
+Closing/Final Shipment continuing to age, save/reload preservation),
+Shipping realization (realized value paid, shipment event uses it, no
+double payment), accounting (freshnessLoss reconciliation, unharvested/
+unshipped fruit contributing nothing, Operating Cost unchanged), tree
+carryover (no aging/decay before harvest), infrastructure interaction
+(faster Shipping reduces loss for an otherwise-identical queue, Specimens
+untouched), and save migration (neutral defaults, preserved queue/
+infrastructure levels) — re-run alongside `verify-market.ts`,
+`verify-market-display.ts`, `verify-specimens.ts`, and
+`verify-shipping-infrastructure.ts`, all still green.
 
 ## Genetic Traits & Radar Chart
 
@@ -276,9 +399,11 @@ Growth, Freshness:
   seconds (12s at 0, 10s at 50, 8s at 100), then each individual regrow
   rolls ±20% around that mean, then Irrigation shortens it further as
   before (`systems/economy.ts` `fruitRegrowSeconds()`).
-- **Freshness** exists genetically and shows on the radar chart, but has
-  **no gameplay/economy effect yet** — reserved for a future
-  Shipping-basket decay mechanic once Shipping's own timing is designed.
+- **Freshness** (`TUNING.FRESHNESS_*`, `systems/freshness.ts`) protects an
+  apple's already-locked harvest value while it waits in the shared Packing
+  queue — see "Freshness" below for the full V1 mechanic. It has no effect
+  before harvest (on-tree fruit never decays) and never affects Growth,
+  Yield, or Market movement.
 - No total/power score is ever shown to the player — only the five actual
   traits and the radar shape.
 
@@ -454,8 +579,8 @@ never stored on a Line — always derived from `visualId` via `APPLE_RARITY`.
   (`ui/StatHelpModal.ts` `openStatHelpModal()`) explaining what each of
   the five genetic stats actually does in plain English — Sweetness/Size
   affect value, Yield affects active-slot count, Growth affects regrow
-  speed, and Freshness is explicitly described as not yet affecting
-  economy (reserved for a future Shipping-decay mechanic). Same close
+  speed, and Freshness reduces value loss while harvested apples wait in
+  Packing (see "Freshness" above for the full V1 mechanic). Same close
   behavior as every other modal (X button only — no outside-click-close
   exists anywhere in this codebase, so this doesn't invent one).
 - **KEEP exactly ONE** offspring into the permanent Library as a new Owned
@@ -1070,8 +1195,9 @@ resets `closing = false` too, defensively, alongside the existing
 
 Not yet implemented (still future work, see Planned direction below):
 the Orchard/global HUD redesign (including the approved
-DAY/TIME → MARKET → NEXT CONTEST → MONEY → END DAY ordering), morning
-fades/rooster audio/page-flip transitions, and Freshness.
+DAY/TIME → MARKET → NEXT CONTEST → MONEY → END DAY ordering) and morning
+fades/rooster audio/page-flip transitions. (Freshness is now implemented —
+see "Freshness" above.)
 
 ## Daily Operating Cost
 
@@ -1244,11 +1370,13 @@ multiplier are not decided yet; not implemented in this pass.
 
 Finite Packing Capacity, Shipping Speed, and the capacity-aware Closing
 collection sequence described above are now implemented — see "Shipping
-Infrastructure" earlier in this file for the full mechanics. Freshness
-value decay (harvested apples losing value the longer they wait in
-Packing) remains explicitly future work, unlocked by this pass but not
-part of it — see Shipping Pipeline's closing note and the Genetic Traits
-section's Freshness bullet.
+Infrastructure" earlier in this file for the full mechanics.
+
+### Freshness V1 — IMPLEMENTED
+
+Freshness now genuinely protects a harvested apple's locked value while it
+waits in Packing — see "Freshness" earlier in this file for the full V1
+mechanic, formula, and accounting integration.
 
 ### Market graph polish — IMPLEMENTED
 
@@ -1262,14 +1390,21 @@ movement line. See Market V1's "Graph clarity pass" subsection above and
 ### Revised priority order
 
 Shipping Pipeline, Day Cycle, Daily Operating Cost, Market V1 (incl. its
-graph clarity pass), Orchard Mutation / Breeding Specimen, and Shipping
-Infrastructure V1 (Packing Capacity / Shipping Speed) are done (see their
-sections above) — remaining order:
+graph clarity pass), Orchard Mutation / Breeding Specimen, Shipping
+Infrastructure V1 (Packing Capacity / Shipping Speed), and Freshness V1 are
+done (see their sections above) — remaining order:
 
-1. Orchard / global UI redesign
-2. Freshness integration
+1. Week 1 / Week 2 full core-loop playtest and balance pass
+2. Orchard / global UI redesign
 3. Collection / Library / Replant cleanup
 4. Final art / animation / sound / font polish
+5. Release pass
+
+Freshness V1 deliberately connects Breeding → Freshness → Packing Capacity →
+Shipping Speed → Money without touching any existing Shipping Infrastructure
+number (see "Freshness" above) — the next step is playtesting that whole
+chain end to end before building further on top of it, not adding another
+major system immediately.
 
 Market V1 was deliberately built ahead of the UI redesign: the prototype
 already had a reasonably engaging core loop, and the open question was

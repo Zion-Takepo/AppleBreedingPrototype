@@ -135,6 +135,17 @@ export interface ProcessingItem {
   fieldId: number;
   value: number;
   baseValue: number;
+  // Freshness V1 (see PROJECT.md "Freshness" and systems/freshness.ts):
+  // both frozen onto the item the instant it enters the queue (harvest
+  // time) and never re-derived from a currently-planted Line afterward —
+  // replanting/breeding/Market changes can never alter an already-queued
+  // item. `freshness` is the harvested apple's exact genetic Freshness
+  // (0..100); `packingWaitSeconds` starts at 0 and advances once per frame
+  // while the farm simulation genuinely runs (see Game.update()) for every
+  // item in the queue, not just the head — stops the instant the item
+  // ships/leaves the queue.
+  freshness: number;
+  packingWaitSeconds: number;
 }
 
 export interface OffspringCandidate extends Variety {
@@ -212,9 +223,16 @@ export interface DayLogEntry {
   harvestRevenue: number;
   marketBonus: number;
   contestPrize: number;
+  // Freshness V1 (see PROJECT.md "Freshness") — the sum, across every apple
+  // shipped this day, of (its locked harvest value - its realized Shipping
+  // value). Subtracted from harvestRevenue+marketBonus (both still the
+  // LOCKED, pre-Freshness-decay figures) to reach realized Gross sales:
+  // harvestRevenue + marketBonus - freshnessLoss + contestPrize -
+  // operatingCost = net.
+  freshnessLoss: number;
   // The day's single Operating Cost figure (see systems/economy.ts
-  // operatingCost) — gross day revenue (harvestRevenue + marketBonus +
-  // contestPrize) minus this equals `net`.
+  // operatingCost) — gross day revenue (harvestRevenue + marketBonus -
+  // freshnessLoss + contestPrize) minus this equals `net`.
   operatingCost: number;
   net: number;
 }
@@ -293,6 +311,13 @@ export interface GameState {
   dayHarvestRevenue: number;
   dayMarketBonus: number;
   dayContestPrize: number;
+  // Freshness V1 running accumulator (see PROJECT.md "Freshness") — sum of
+  // (lockedHarvestValue - realizedValue) across every apple shipped today
+  // while the day isn't already settled, mirroring the
+  // dayHarvestRevenue/dayMarketBonus/dayContestPrize guard exactly. Reset
+  // to 0 on every day transition; settled into DayLogEntry.freshnessLoss by
+  // Game.finishClosing().
+  dayFreshnessLoss: number;
   highestSweetnessEver: number;
   largestSizeEver: number;
   hasUnseenDiscovery: boolean;
