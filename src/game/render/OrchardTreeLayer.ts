@@ -17,12 +17,21 @@ interface TreeLayoutSlot {
   scale: number;
 }
 
-// 2 back-row trees (smaller, higher, peeking between the front row) + 3
-// front-row trees (full size, dominant). Order matters: back row is added
-// first so front row visually sits in front of it.
+// 2 back-row trees (positioned higher, peeking between the front row) + 3
+// front-row trees, laid out as:
+//
+//              TREE 4        TREE 5
+//
+//      TREE 1      TREE 2      TREE 3
+//
+// Order matters: back row is added first so front row visually sits in
+// front of it. HARD REQUIREMENT (see PROJECT.md "Orchard UI redesign" /
+// "FIVE TREES — ALL EQUAL VISUAL SIZE"): all five use the identical `scale`
+// — depth is suggested by ground placement/layer overlap only, never by
+// shrinking the rear two. Do not reintroduce a smaller back-row scale.
 const TREE_LAYOUT: TreeLayoutSlot[] = [
-  { x: 500, groundY: 300, scale: 0.84 },
-  { x: 1100, groundY: 300, scale: 0.84 },
+  { x: 500, groundY: 280, scale: 1.0 },
+  { x: 1100, groundY: 280, scale: 1.0 },
   { x: 240, groundY: 356, scale: 1.0 },
   { x: 800, groundY: 356, scale: 1.0 },
   { x: 1360, groundY: 356, scale: 1.0 },

@@ -7,23 +7,56 @@ import { gameClockLabel } from '../systems/clock.ts';
 import { formatMarketPct, strongestMover } from '../systems/market.ts';
 import { openMarketOverview } from './MarketScreen.ts';
 import { openContestInfoModal } from './ContestInfoModal.ts';
-import { LAYOUT, THEME } from './theme.ts';
+import { LAYOUT, ORCHARD, THEME } from './theme.ts';
 import { Button, formatMoney, text as mkText } from './uiKit.ts';
 
-// Where the compact shipment "+$" feedback rests, directly under the HUD's
-// cash total (cashText below, at x=350) — not a HUD layout change, just a
-// small transient label anchored just outside the HUD bar itself.
-const SHIPMENT_FEEDBACK_X = 350;
-const SHIPMENT_FEEDBACK_Y = LAYOUT.hudHeight + 20;
+// Orchard UI redesign (see PROJECT.md "Orchard UI redesign"): the top HUD is
+// several independent deep-forest cards with visible gaps between them —
+// the sky stays visible — instead of one continuous full-width strip. Every
+// card still shows only real, existing GameState (day/time, cash, market,
+// contest, end day) — no invented currencies/resources.
+const CARD_Y = 14;
+const CARD_H = 56;
+const CARD_GAP = 10;
+const CARD_RADIUS = 12;
+
+const DAY_CARD_X = 16;
+const DAY_CARD_W = 230;
+const CASH_CARD_X = DAY_CARD_X + DAY_CARD_W + CARD_GAP;
+const CASH_CARD_W = 170;
+const MARKET_CARD_X = CASH_CARD_X + CASH_CARD_W + CARD_GAP;
+const MARKET_CARD_W = 290;
+const CONTEST_CARD_X = MARKET_CARD_X + MARKET_CARD_W + CARD_GAP;
+const CONTEST_CARD_W = 380;
+const END_DAY_CARD_W = 208;
+const END_DAY_CARD_X = LAYOUT.width - 16 - END_DAY_CARD_W;
+
+// Compact shipment "+$" feedback, directly under the CASH card.
+const SHIPMENT_FEEDBACK_X = CASH_CARD_X + CASH_CARD_W / 2;
+const SHIPMENT_FEEDBACK_Y = CARD_Y + CARD_H + 6;
 const SHIPMENT_FEEDBACK_RISE_PX = 14;
 const SHIPMENT_FEEDBACK_DURATION_MS = 700;
+
+/** Draws one deep-forest card shell with a thin, restrained gold border. */
+function drawCard(scene: Phaser.Scene, x: number, w: number): Phaser.GameObjects.Graphics {
+  const g = scene.add.graphics();
+  g.fillStyle(ORCHARD.forestDeep, 1);
+  g.fillRoundedRect(x, CARD_Y, w, CARD_H, CARD_RADIUS);
+  g.lineStyle(1.5, ORCHARD.gold, 0.55);
+  g.strokeRoundedRect(x, CARD_Y, w, CARD_H, CARD_RADIUS);
+  return g;
+}
+
+function microLabel(scene: Phaser.Scene, x: number, str: string): Phaser.GameObjects.Text {
+  return mkText(scene, x, CARD_Y + 9, str, 12, ORCHARD.goldStr, true, true).setOrigin(0, 0);
+}
 
 export class HUD extends Phaser.GameObjects.Container {
   private game: Game;
   private dayText: Phaser.GameObjects.Text;
-  private timerText: Phaser.GameObjects.Text;
   private cashText: Phaser.GameObjects.Text;
   private marketText: Phaser.GameObjects.Text;
+  private eventLabel: Phaser.GameObjects.Text;
   private eventText: Phaser.GameObjects.Text;
   private endDayBtn: Button;
   private onEndDay: () => void;
@@ -42,35 +75,39 @@ export class HUD extends Phaser.GameObjects.Container {
     this.game = game;
     this.onEndDay = onEndDay;
 
-    const bg = scene.add.graphics();
-    bg.fillStyle(THEME.hudBg, 1);
-    bg.fillRect(0, 0, LAYOUT.width, LAYOUT.hudHeight);
-    this.add(bg);
+    // DAY / TIME card
+    this.add(drawCard(scene, DAY_CARD_X, DAY_CARD_W));
+    this.add(microLabel(scene, DAY_CARD_X + 14, 'DAY / TIME'));
+    this.dayText = mkText(scene, DAY_CARD_X + 14, CARD_Y + 26, '', 22, THEME.textLight, true, true).setOrigin(0, 0);
+    this.add(this.dayText);
 
-    const y = LAYOUT.hudHeight / 2;
-    this.dayText = mkText(scene, 20, y, '', 26, THEME.textLight, true, true).setOrigin(0, 0.5);
-    this.timerText = mkText(scene, 170, y, '', 24, THEME.textGold, false, true).setOrigin(0, 0.5);
-    this.cashText = mkText(scene, 350, y, '', 26, '#a8e06a', true, true).setOrigin(0, 0.5);
-    this.marketText = mkText(scene, 560, y, '', 24, THEME.textLight).setOrigin(0, 0.5);
-    this.eventText = mkText(scene, 930, y, '', 19, '#cfe8c8').setOrigin(0, 0.5);
-    this.add([this.dayText, this.timerText, this.cashText, this.marketText, this.eventText]);
+    // CASH card
+    this.add(drawCard(scene, CASH_CARD_X, CASH_CARD_W));
+    this.add(microLabel(scene, CASH_CARD_X + 14, 'CASH'));
+    this.cashText = mkText(scene, CASH_CARD_X + 14, CARD_Y + 26, '', 22, '#c9e69a', true, true).setOrigin(0, 0);
+    this.add(this.cashText);
 
-    // Market V1's smallest access path: the existing HUD Market headline
-    // opens the Market overview modal directly — no new bottom-nav tab, no
-    // HUD reorder (see PROJECT.md "How to access Market"). Zone sized to
-    // cover the headline's text run without encroaching on cashText/
-    // eventText's own hit areas.
-    const marketZone = scene.add.zone(550, 0, 370, LAYOUT.hudHeight).setOrigin(0, 0);
-    marketZone.setInteractive();
+    // MARKET card — clickable, opens the Market overview modal (unchanged
+    // access path, just re-homed into its own card).
+    this.add(drawCard(scene, MARKET_CARD_X, MARKET_CARD_W));
+    this.add(microLabel(scene, MARKET_CARD_X + 14, 'MARKET'));
+    this.marketText = mkText(scene, MARKET_CARD_X + 14, CARD_Y + 26, '', 19, THEME.textLight).setOrigin(0, 0);
+    this.add(this.marketText);
+    const marketZone = scene.add.zone(MARKET_CARD_X, CARD_Y, MARKET_CARD_W, CARD_H).setOrigin(0, 0);
+    marketZone.setInteractive({ useHandCursor: true });
     marketZone.on('pointerdown', () => openMarketOverview(scene, game));
     this.add(marketZone);
 
-    // NEXT CONTEST / CONTEST TODAY headline (see PROJECT.md "Contest"
-    // section 8) — clicking it opens a small Contest info modal for
-    // whichever Contest eventText is currently describing (today's, if
-    // pending, otherwise the upcoming one — see refresh() below).
-    const contestZone = scene.add.zone(930, 0, 430, LAYOUT.hudHeight).setOrigin(0, 0);
-    contestZone.setInteractive();
+    // CONTEST card — clickable, opens Contest info for whichever Contest
+    // eventText currently describes (today's, if pending, otherwise the
+    // upcoming one — see refresh() below).
+    this.add(drawCard(scene, CONTEST_CARD_X, CONTEST_CARD_W));
+    this.eventLabel = microLabel(scene, CONTEST_CARD_X + 14, 'NEXT CONTEST');
+    this.add(this.eventLabel);
+    this.eventText = mkText(scene, CONTEST_CARD_X + 14, CARD_Y + 26, '', 18, THEME.textLight).setOrigin(0, 0);
+    this.add(this.eventText);
+    const contestZone = scene.add.zone(CONTEST_CARD_X, CARD_Y, CONTEST_CARD_W, CARD_H).setOrigin(0, 0);
+    contestZone.setInteractive({ useHandCursor: true });
     contestZone.on('pointerdown', () => {
       if (this.hudContestDay !== null && this.hudContestType !== null) {
         openContestInfoModal(scene, this.hudContestDay, this.hudContestType);
@@ -78,11 +115,12 @@ export class HUD extends Phaser.GameObjects.Container {
     });
     this.add(contestZone);
 
-    this.shipmentText = mkText(scene, SHIPMENT_FEEDBACK_X, SHIPMENT_FEEDBACK_Y, '', 20, '#2f5a20', true, true).setOrigin(0, 0);
+    this.shipmentText = mkText(scene, SHIPMENT_FEEDBACK_X, SHIPMENT_FEEDBACK_Y, '', 18, '#c9e69a', true, true).setOrigin(0.5, 0);
     this.shipmentText.setAlpha(0);
     this.add(this.shipmentText);
 
-    this.endDayBtn = new Button(scene, LAYOUT.width - 124, y, 208, 48, 'END DAY', this.onEndDay, THEME.gold, 24);
+    // END DAY — the strongest, top-right action, unchanged behavior.
+    this.endDayBtn = new Button(scene, END_DAY_CARD_X + END_DAY_CARD_W / 2, CARD_Y + CARD_H / 2, END_DAY_CARD_W, CARD_H, 'END DAY', this.onEndDay, THEME.gold, 22);
     this.add(this.endDayBtn);
 
     scene.add.existing(this);
@@ -96,7 +134,7 @@ export class HUD extends Phaser.GameObjects.Container {
     });
   }
 
-  // Compact "+$X.XX" under the cash total: fades in place, drifts lightly
+  // Compact "+$X.XX" under the cash card: fades in place, drifts lightly
   // upward, fades out — reusing the same Text/position every time rather
   // than stacking a list. Paired with a subtle scale pulse on the cash
   // total itself, since this is the moment cash actually increases.
@@ -126,16 +164,14 @@ export class HUD extends Phaser.GameObjects.Container {
 
   refresh(): void {
     const s = this.game.state;
-    this.dayText.setText(`DAY ${s.day}`);
-    // Ended state lives in this same DAY/TIME area (not a separate "Day
-    // ended" item) — see PROJECT.md Day Cycle. Full future HUD
-    // reorder/redesign is intentionally out of scope for this pass.
+    // Ended state lives in this same DAY/TIME card (not a separate "Day
+    // ended" item) — see PROJECT.md Day Cycle.
     if (s.dayEnded) {
-      this.timerText.setText('· CLOSED');
+      this.dayText.setText(`DAY ${s.day} · CLOSED`);
     } else if (s.closing) {
-      this.timerText.setText('· CLOSING…');
+      this.dayText.setText(`DAY ${s.day} · CLOSING…`);
     } else {
-      this.timerText.setText(`· ${gameClockLabel(s.dayTimeRemaining)}`);
+      this.dayText.setText(`DAY ${s.day} · ${gameClockLabel(s.dayTimeRemaining)}`);
     }
     this.cashText.setText(`$${formatMoney(s.cash)}`);
 
@@ -145,10 +181,10 @@ export class HUD extends Phaser.GameObjects.Container {
     // internal visualId.
     const mover = strongestMover(s.visualMarket, s.discoveredVisualIds);
     if (!mover || Math.abs(mover.pct) < 0.005) {
-      this.marketText.setText('Market: steady ▸');
+      this.marketText.setText('Steady ▸');
     } else {
       const num = String(APPLE_CATALOG_NUMBER[mover.visualId]).padStart(3, '0');
-      this.marketText.setText(`Market: #${num} ${formatMarketPct(mover.pct)} ▸`);
+      this.marketText.setText(`#${num} ${formatMarketPct(mover.pct)} ▸`);
     }
 
     // NEXT CONTEST / CONTEST TODAY (see PROJECT.md "Contest" section 8) —
@@ -159,12 +195,14 @@ export class HUD extends Phaser.GameObjects.Container {
     const today = getDayDef(s.day);
     const todayPending = today.event === 'CONTEST' && !(s.contest?.day === s.day && s.contest.resolved);
     if (todayPending) {
-      this.eventText.setText(`CONTEST TODAY · ${today.title}`);
+      this.eventLabel.setText('CONTEST TODAY');
+      this.eventText.setText(`${today.title} ▸`);
       this.hudContestDay = today.day;
       this.hudContestType = today.contestType ?? null;
     } else {
       const next = nextEvent(s.day);
-      this.eventText.setText(`NEXT CONTEST · DAY ${next.day} · ${next.title}`);
+      this.eventLabel.setText('NEXT CONTEST');
+      this.eventText.setText(`DAY ${next.day} · ${next.title} ▸`);
       this.hudContestDay = next.day;
       this.hudContestType = next.contestType ?? null;
     }

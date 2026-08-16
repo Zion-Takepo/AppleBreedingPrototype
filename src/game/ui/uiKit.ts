@@ -11,6 +11,13 @@ export class Button extends Phaser.GameObjects.Container {
   private baseColor: number;
   private onClickCb: () => void;
   private badge: Phaser.GameObjects.Arc | null = null;
+  private textColor: string;
+  // Optional thin accent-colored outer stroke, layered on top of the
+  // normal border — opt-in only (defaults off), used where a button needs
+  // to read as "selected" or "primary" without changing its fill color
+  // (see ui/OrchardScreen.ts Cultivation segmented control / HARVEST ALL).
+  private accentOn = false;
+  private accentColor = THEME.gold;
 
   constructor(
     scene: Phaser.Scene,
@@ -23,12 +30,14 @@ export class Button extends Phaser.GameObjects.Container {
     color = THEME.accent,
     fontSize = 28,
     numeric = false,
+    textColor = THEME.textLight,
   ) {
     super(scene, x, y);
     this.boxW = w;
     this.boxH = h;
     this.onClickCb = onClick;
     this.baseColor = color;
+    this.textColor = textColor;
 
     this.bg = scene.add.graphics();
     this.add(this.bg);
@@ -36,7 +45,7 @@ export class Button extends Phaser.GameObjects.Container {
       .text(0, 0, text, {
         fontFamily: numeric ? THEME.fontNumeric : THEME.font,
         fontSize: `${fontSize}px`,
-        color: THEME.textLight,
+        color: this.textColor,
         align: 'center',
       })
       .setOrigin(0.5);
@@ -87,6 +96,20 @@ export class Button extends Phaser.GameObjects.Container {
     return this;
   }
 
+  setTextColor(color: string): this {
+    this.textColor = color;
+    this.label.setColor(color);
+    return this;
+  }
+
+  /** Toggles a thin accent-colored outer stroke on top of the normal border — see the field doc comment above. */
+  setAccent(active: boolean, color = THEME.gold): this {
+    this.accentOn = active;
+    this.accentColor = color;
+    this.redraw();
+    return this;
+  }
+
   setEnabled(e: boolean): this {
     this.enabled = e;
     this.redraw();
@@ -117,6 +140,10 @@ export class Button extends Phaser.GameObjects.Container {
     }
     this.bg.lineStyle(3, 0x000000, 0.15);
     this.bg.strokeRoundedRect(-this.boxW / 2, -this.boxH / 2, this.boxW, this.boxH, 16);
+    if (this.accentOn && this.enabled) {
+      this.bg.lineStyle(2, this.accentColor, 0.9);
+      this.bg.strokeRoundedRect(-this.boxW / 2, -this.boxH / 2, this.boxW, this.boxH, 16);
+    }
     this.label.setAlpha(this.enabled ? 1 : 0.65);
   }
 }

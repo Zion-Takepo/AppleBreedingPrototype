@@ -28,10 +28,11 @@ rather than adding a runtime scale/zoom layer.
 ## Screens
 
 Four persistent-bottom-nav screens: **ORCHARD**, **BREED**, **CALENDAR**,
-**COLLECTION**, plus a top HUD (day, timer, cash, market highlight, next
-event, END DAY button). Nav tabs show a small red dot when a screen has a
-pending useful action (harvest ready, breeding result ready, unseen trait
-discovery).
+**COLLECTION**, plus a top HUD of separate cards (day/time, cash, market
+highlight, next event, END DAY button — see "Orchard UI Redesign (Structure
+Pass)" below for the current card-based layout). Nav tabs show a small red
+dot when a screen has a pending useful action (harvest ready, breeding
+result ready, unseen trait discovery).
 
 ## First-session onboarding
 
@@ -263,12 +264,17 @@ for what still needs human browser verification.
 
 ## Orchard
 
-- Up to 4 Fields, one variety each, selected via horizontal tabs (`+ FIELD`
-  tab to buy the next one).
-- Each Field view renders 5 procedural trees (3 front row, dominant; 2 back
-  row, smaller/higher) with a triangle of 3 fruit slots each — 15 physical
-  fruit slots total per Field, though not all are necessarily *active* (see
-  Yield below). There is **no whole-field growth cycle** — each active slot
+- Up to 4 Fields, one variety each, selected via the compact top-left Field
+  card's dropdown-style switcher (see "Orchard UI Redesign (Structure
+  Pass)" below; a `+ FIELD` pill on the same card buys the next one).
+- Each Field renders 5 procedural trees: 3 front-row and 2 back-row. All
+  five trees use the same visual scale — the two back-row trees are
+  positioned higher to suggest depth, but are never smaller (see "Orchard
+  UI Redesign (Structure Pass)" below). Each tree has 3 physical fruit
+  slots arranged in a triangle, so each Field has 15 physical fruit slots
+  total, though not all are necessarily *active* — Yield determines how
+  many slots are active/productive (see Yield below). There is **no
+  whole-field growth cycle** — each active slot
   regrows completely independently (`Field.slots`, an array of
   `{ ripe, timer, active }`), ticked every frame in `Game.update()`
   regardless of which field tab is selected or whether the day is active.
@@ -367,11 +373,49 @@ and `src/game/render/OrchardTreeLayer.ts` (how trees/fruit consume it).
   transforms, or hitbox alignment, which need human browser verification.
 
 **Not yet implemented** (future Living Orchard passes, in rough order):
-1. Final layered painterly Orchard art (this pass is placeholder art only).
+1. Final layered painterly Orchard art (this pass is placeholder art only —
+   see "Orchard UI Redesign (Structure Pass)" below for the now-implemented
+   layout that final art will be built around).
 2. Environmental ambience — wind audio, birds, time-of-day sound.
-3. Orchard UI redesign (background, HUD, Packing box, nav).
-4. Reactive harvest/shipping polish.
-5. Time-of-day visual atmosphere.
+3. Reactive harvest/shipping polish.
+4. Time-of-day visual atmosphere.
+
+## Orchard UI Redesign (Structure Pass)
+
+**Implemented — layout/composition only, CURRENT PLACEHOLDER ART.** The
+approved final Orchard UI structure and tree layout, built with the existing
+procedural trees/apples/panels — no painterly scenery, no audio. Final
+painterly art assets are a separate later pass; this pass only locks the
+composition they'll be built around.
+
+ORCHARD UI DIRECTION LOCKED:
+- scenery-first — no tall permanent side panels (see `ui/OrchardScreen.ts`)
+- separate top status cards (DAY/TIME, CASH, MARKET, CONTEST, END DAY), not
+  a full-width bar (`ui/HUD.ts`)
+- deep forest green + warm cream + restrained gold accent palette
+  (`ORCHARD` in `ui/theme.ts`), layered on top of — not replacing — the
+  existing `THEME` tokens Breed/Calendar/Collection still use
+- five equal-size playable trees (`render/OrchardTreeLayer.ts`
+  `TREE_LAYOUT` — all five share one `scale`; depth comes from position
+  only, never from shrinking the rear two)
+- compact top-left Field card (current Field index/total, planted Line name
+  + dropdown-style field switcher, Add Field pill) replacing the old
+  horizontal field-tab strip
+- compact lower-left Stats card — Sweetness/Size/Yield/Growth/Freshness
+  with small glyph icons, for the currently selected Field/Line
+- compact lower-right Orchard action card — Cultivation segmented control,
+  Change Variety, Packing count/capacity (detailed cadence/cost stay behind
+  the existing Shipping Infrastructure modal), HARVEST ALL
+- compact centered bottom navigation bar (`ui/BottomNav.ts`) with
+  horizontal breathing room on both sides, replacing the old full-width strip
+- final painterly art assets still pending (see "Living Orchard Motion
+  Prototype" above)
+- Living Orchard motion remains approved/frozen — untouched by this pass
+  beyond the tree scale/position changes above (wind model, sway tuning,
+  reveal/harvest tweens, hitboxes all unchanged)
+
+Do not mark final Orchard presentation complete — final art/audio passes
+remain.
 
 ## Shipping Pipeline
 

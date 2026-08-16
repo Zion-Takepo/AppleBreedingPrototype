@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
-import { LAYOUT, THEME } from './theme.ts';
+import { LAYOUT, ORCHARD, THEME } from './theme.ts';
 import { text as mkText } from './uiKit.ts';
 
 export type ScreenId = 'ORCHARD' | 'BREED' | 'CALENDAR' | 'COLLECTION';
@@ -16,6 +16,18 @@ const TABS: { id: ScreenId; label: string }[] = [
 // "First-session onboarding" section 3) while the player's onboarding goal
 // is to open it, so they notice where to go next without a blocking modal.
 const BREED_TAB_INDEX = 1;
+
+// Orchard UI redesign (see PROJECT.md "Orchard UI redesign" / "BOTTOM
+// NAVIGATION"): one compact, centered bar instead of a full-viewport-width
+// strip, so it never crowds the far left/right edges — deliberate
+// horizontal breathing room on both sides.
+const BAR_W = 900;
+const BAR_X = (LAYOUT.width - BAR_W) / 2;
+const BAR_Y = 8;
+const BAR_H = LAYOUT.navHeight - BAR_Y * 2;
+const BAR_RADIUS = 16;
+const TAB_W = BAR_W / TABS.length;
+const TAB_INSET = 4; // active-tab highlight inset from the segment edges
 
 // Pointing-hand indicator (see PROJECT.md "First-session onboarding") — a
 // simple minimal Phaser shape (a downward-pointing chevron), not a text/
@@ -34,7 +46,6 @@ export class BottomNav extends Phaser.GameObjects.Container {
   private tabGfx: Phaser.GameObjects.Graphics[] = [];
   private tabLabels: Phaser.GameObjects.Text[] = [];
   private badges: Phaser.GameObjects.Arc[] = [];
-  private tabW: number;
   private breedPulseTween: Phaser.Tweens.Tween | null = null;
   // Much-stronger BREED tutorial callout (see PROJECT.md "First-session
   // onboarding" — the subtle label pulse alone was found too easy to miss):
@@ -49,44 +60,59 @@ export class BottomNav extends Phaser.GameObjects.Container {
     super(scene, 0, LAYOUT.contentBottom);
     this.game = game;
     this.onSelect = onSelect;
-    this.tabW = LAYOUT.width / TABS.length;
+
+    // Shell: one rounded deep-forest bar with a thin gold outline, behind
+    // every tab's own per-segment highlight graphics.
+    const shell = scene.add.graphics();
+    shell.fillStyle(ORCHARD.forestDeep, 1);
+    shell.fillRoundedRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_RADIUS);
+    shell.lineStyle(2, ORCHARD.gold, 0.6);
+    shell.strokeRoundedRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_RADIUS);
+    this.add(shell);
 
     TABS.forEach((tab, i) => {
-      const x = i * this.tabW;
+      const x = BAR_X + i * TAB_W;
       const g = scene.add.graphics();
       this.add(g);
       this.tabGfx.push(g);
 
-      const label = mkText(scene, x + this.tabW / 2, LAYOUT.navHeight / 2, tab.label, 24, THEME.textLight, true).setOrigin(0.5);
+      const label = mkText(scene, x + TAB_W / 2, BAR_Y + BAR_H / 2, tab.label, 21, ORCHARD.textWarmLight, true).setOrigin(0.5);
       this.add(label);
       this.tabLabels.push(label);
 
-      const badge = scene.add.circle(x + this.tabW / 2 + 68, LAYOUT.navHeight / 2 - 20, 8, 0xe0392b);
+      const badge = scene.add.circle(x + TAB_W / 2 + 60, BAR_Y + BAR_H / 2 - 16, 7, 0xe0392b);
       badge.setStrokeStyle(2, 0xffffff);
       badge.setVisible(false);
       this.add(badge);
       this.badges.push(badge);
 
-      const zone = scene.add.zone(x, 0, this.tabW, LAYOUT.navHeight).setOrigin(0, 0);
-      zone.setInteractive();
+      const zone = scene.add.zone(x, BAR_Y, TAB_W, BAR_H).setOrigin(0, 0);
+      zone.setInteractive({ useHandCursor: true });
       zone.on('pointerdown', () => this.onSelect(tab.id));
       this.add(zone);
+
+      if (i > 0) {
+        const divider = scene.add.graphics();
+        divider.lineStyle(1, ORCHARD.gold, 0.25);
+        divider.lineBetween(x, BAR_Y + 10, x, BAR_Y + BAR_H - 10);
+        this.add(divider);
+      }
     });
 
     // White ring around the BREED tab — added after every tab's own
     // graphics/label/zone so it always draws on top of them, but it's
     // purely a stroked outline (no fill, no interactive zone), so it never
     // changes the tab's existing hitbox/interaction area.
-    const breedX = BREED_TAB_INDEX * this.tabW;
+    const breedX = BAR_X + BREED_TAB_INDEX * TAB_W;
     this.breedRingGfx = scene.add.graphics();
     this.breedRingGfx.lineStyle(4, 0xffffff, 1);
-    this.breedRingGfx.strokeRoundedRect(breedX + 4, 4, this.tabW - 8, LAYOUT.navHeight - 8, 10);
+    this.breedRingGfx.strokeRoundedRect(breedX + 4, BAR_Y + 4, TAB_W - 8, BAR_H - 8, 10);
     this.breedRingGfx.setVisible(false);
     this.add(this.breedRingGfx);
 
     // Pointing-hand indicator — a simple downward-pointing chevron hovering
     // just above the BREED tab (see the constant doc comment above).
-    const breedCenterX = breedX + this.tabW / 2;
+    const breedCenterX = breedX + TAB_W / 2;
     this.breedPointer = scene.add.graphics();
     this.breedPointer.setPosition(breedCenterX, POINTER_BASE_Y);
     this.breedPointer.fillStyle(0xffffff, 1);
@@ -166,11 +192,15 @@ export class BottomNav extends Phaser.GameObjects.Container {
       const g = this.tabGfx[i];
       g.clear();
       const isActive = tab.id === this.activeTab;
-      g.fillStyle(isActive ? THEME.navActive : THEME.navBg, 1);
-      g.fillRect(i * this.tabW, 0, this.tabW, LAYOUT.navHeight);
-      if (i > 0) {
-        g.lineStyle(2, 0x000000, 0.25);
-        g.lineBetween(i * this.tabW, 0, i * this.tabW, LAYOUT.navHeight);
+      if (isActive) {
+        // Restrained highlight: an inset gold-tinted fill plus a slim gold
+        // underline, rather than a loud color swap — active ORCHARD reads
+        // clearly without breaking the bar's calm deep-forest read.
+        const x = BAR_X + i * TAB_W;
+        g.fillStyle(ORCHARD.forestMid, 1);
+        g.fillRoundedRect(x + TAB_INSET, BAR_Y + TAB_INSET, TAB_W - TAB_INSET * 2, BAR_H - TAB_INSET * 2, 12);
+        g.fillStyle(THEME.gold, 1);
+        g.fillRoundedRect(x + TAB_INSET + 10, BAR_Y + BAR_H - TAB_INSET - 5, TAB_W - TAB_INSET * 2 - 20, 3, 2);
       }
     });
     this.refresh();

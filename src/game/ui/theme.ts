@@ -7,7 +7,11 @@
 export const LAYOUT = {
   width: 1600,
   height: 900,
-  hudHeight: 64,
+  // Top HUD is now several separate cards (DAY/TIME, CASH, MARKET, CONTEST,
+  // END DAY) with visible gaps between them, not one full-width strip — see
+  // ui/HUD.ts and PROJECT.md "Orchard UI redesign". Raised from the old
+  // single-row 64px bar to fit the card's own top/bottom margins.
+  hudHeight: 84,
   navHeight: 88,
   get contentTop() {
     return this.hudHeight;
@@ -45,4 +49,22 @@ export const THEME = {
   // (same font stack, just reordered) gives lining figures without
   // introducing a new typeface. Used only for numeral-heavy text.
   fontNumeric: '"Trebuchet MS", Georgia, sans-serif',
+};
+
+// Orchard presentation palette (see PROJECT.md "Orchard UI redesign" /
+// "COLOR SYSTEM") — warm, elegant, pastoral, scenery-first. Deliberately a
+// SEPARATE set of tokens from THEME above rather than edits to it: THEME's
+// existing keys (accent/gold/hudBg/navBg/etc.) are still read by
+// Breed/Calendar/Collection and various modals, which this pass explicitly
+// does not restyle. Used by the shared always-visible chrome this pass DOES
+// target (HUD, BottomNav) and by OrchardScreen's own cards.
+export const ORCHARD = {
+  forestDeep: 0x1c3320,
+  forestMid: 0x47703a,
+  cream: 0xf5efd4,
+  creamStr: '#f5efd4',
+  gold: 0xcc9c3c,
+  goldStr: '#cc9c3c',
+  textDark: '#29301e',
+  textWarmLight: '#eee8cd',
 };

@@ -19,7 +19,7 @@ import { text as mkText } from './uiKit.ts';
 // avoid the Calendar week-strip, which otherwise occupies this same top
 // band on every other screen.
 const BANNER_X = 1110;
-const BANNER_Y = 68;
+const BANNER_Y = 92;
 const BANNER_W = 372;
 const BANNER_PAD_X = 14;
 const BANNER_PAD_TOP = 8;
