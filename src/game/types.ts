@@ -1,4 +1,4 @@
-import type { AppleColor, ApplePattern } from './tuning.ts';
+import type { AppleColor, ApplePattern, ContestType } from './tuning.ts';
 import type { AppleAssetId } from './render/appleAssets.ts';
 
 export type CultivationPolicy = 'NORMAL' | 'SWEETEN' | 'GROW_BIG';
@@ -225,12 +225,47 @@ export interface VisualMarketEntry {
   history: MarketHistoryPoint[];
 }
 
-export interface ContestResult {
-  day: number;
-  varietyId: string;
-  varietyName: string;
+// Contest V1 (see PROJECT.md "Contest" and systems/contest.ts). One NPC
+// farm's persisted result — generated exactly once, alongside the rest of
+// the Contest's result, and never rerolled.
+export interface ContestNpcResult {
+  name: string;
   score: number;
-  place: 1 | 2 | 3 | 0;
+}
+
+// The CURRENT/most-recent Contest's full persisted state (GameState.contest
+// below). Created lazily the moment Closing's Final Shipment queue empties
+// on a Contest Day (see Game.advanceContestGate) and never re-created for
+// the same day — this is what makes a reload before/after entry resume
+// exactly, and makes a reload unable to reroll luck/NPC results once
+// `resolved` is true (see PROJECT.md sections 13/19).
+export interface ContestState {
+  day: number;
+  type: ContestType;
+  resolved: boolean;
+  // Locked the instant ENTER APPLE is confirmed (Game.confirmContestEntry) —
+  // null before that, and null forever if the defensive zero-eligible-Lines
+  // fallback fires (see PROJECT.md section 12's "do not softlock" note).
+  entryLineId: string | null;
+  playerScore: number | null;
+  // Exactly 5 entries once resolved, one per TUNING.CONTEST_NPC_NAMES, in
+  // that same order.
+  npcResults: ContestNpcResult[] | null;
+  // 1..6, or null if the player had no entry this Contest.
+  rank: number | null;
+  prize: number;
+}
+
+// A compact permanent record of every RESOLVED Contest — purely for
+// Collection/Line awards and the Week Summary's "Contest Wins" stat (see
+// ui/WeekSummaryModal.ts). GameState.contest above only ever holds the
+// current/most-recent Contest's full detail; this is the lightweight
+// history trail, never redundantly duplicating anything already derivable
+// from it.
+export interface ContestHistoryEntry {
+  day: number;
+  type: ContestType;
+  rank: number | null;
   prize: number;
 }
 
@@ -310,9 +345,15 @@ export interface GameState {
   // systems/market.ts). Undiscovered visualIds never get an entry.
   visualMarket: Record<AppleAssetId, VisualMarketEntry>;
   totalRevenue: number;
-  contestResults: ContestResult[];
-  day4ContestDone: boolean;
-  day7FairDone: boolean;
+  // Contest V1 (see PROJECT.md "Contest" and systems/contest.ts). Null
+  // whenever no Contest is currently pending/mid-resolution for today (the
+  // common case on any non-Contest day, and on a Contest day before Closing
+  // reaches the Contest gate) — check `contest.day === state.day` before
+  // trusting it as "today's" Contest, since it deliberately isn't cleared
+  // when the day advances (see contestHistory above for the permanent trail
+  // once a Contest resolves).
+  contest: ContestState | null;
+  contestHistory: ContestHistoryEntry[];
   day5MutationGuaranteeUsed: boolean;
   day1YellowGuaranteeUsed: boolean;
   lastDayLog: DayLogEntry | null;

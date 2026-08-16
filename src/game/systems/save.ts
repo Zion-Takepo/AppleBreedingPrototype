@@ -296,6 +296,18 @@ function migrateState(state: GameState): void {
     const legacy = state as unknown as { closingWarning30Shown?: boolean; closingWarning10Shown?: boolean };
     state.closingWarningShown = legacy.closingWarning30Shown === true || legacy.closingWarning10Shown === true;
   }
+
+  // Contest V1 (see PROJECT.md "Contest") replaced the old Day 4 Sweetness
+  // Contest / Day 7 Apple Fair placeholder entirely — a save written before
+  // this pass has no `contest`/`contestHistory` at all (its old
+  // `contestResults`/`day4ContestDone`/`day7FairDone` fields, if present,
+  // are simply left as harmless unread JSON residue rather than explicitly
+  // migrated, since nothing in the new system reads them). `contest: null`
+  // is exactly correct regardless of which day the save is on — the new
+  // gate only ever creates a non-null ContestState from inside
+  // Game.update()'s own Contest Day Closing flow, never here.
+  if (typeof state.contest === 'undefined') state.contest = null;
+  if (!Array.isArray(state.contestHistory)) state.contestHistory = [];
 }
 
 export function loadState(): GameState | null {

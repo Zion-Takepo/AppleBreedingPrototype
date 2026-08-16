@@ -134,25 +134,50 @@ export const TUNING = {
   MARKET_PCT_MAX: 0.6, // safe clamp ceiling: multiplier never above 1.60x
   MARKET_HISTORY_DAYS: 5,
 
-  CONTEST_DAY4: {
-    day: 4,
-    tier3: 65,
-    tier2: 72,
-    tier1: 79,
-    prize1: 350,
-    prize2: 180,
-    prize3: 80,
-  },
-
-  FAIR_DAY7: {
-    day: 7,
-    tier3: 35,
-    tier2: 50,
-    tier1: 65,
-    prize1: 400,
-    prize2: 200,
-    prize3: 90,
-  },
+  // Contest V1 (see PROJECT.md "Contest" and systems/contest.ts). Fixed
+  // four-type rotation starting Day 7, repeating every 7 days (Day 7, 14,
+  // 21, 28, 35...) — see CONTEST_TYPES near the bottom of this file for the
+  // type enum + rotation order itself, kept as a standalone export (like
+  // AppleColor/ApplePattern above) rather than nested here so
+  // systems/contest.ts and types.ts can both import just the type/order
+  // without pulling in the rest of TUNING.
+  CONTEST_START_DAY: 7,
+  CONTEST_INTERVAL_DAYS: 7,
+  // Specialized Contests (BIGGEST/SWEETEST/FRESHEST): baseScore = mainStat *
+  // MAIN_WEIGHT + averageStat * AVERAGE_WEIGHT.
+  CONTEST_SPECIALIZED_MAIN_WEIGHT: 0.85,
+  CONTEST_SPECIALIZED_AVERAGE_WEIGHT: 0.15,
+  // GRAND CHAMPION: baseScore = averageStat * AVERAGE_WEIGHT + lowestStat *
+  // LOWEST_WEIGHT — rewards overall quality AND balance across all five
+  // genetic stats, never just one.
+  CONTEST_GRAND_AVERAGE_WEIGHT: 0.8,
+  CONTEST_GRAND_LOWEST_WEIGHT: 0.2,
+  // One shared luck roll per entry (player and each NPC alike), uniform in
+  // this range, added to the base score before the final 0..100 clamp.
+  CONTEST_LUCK_MIN: -3.0,
+  CONTEST_LUCK_MAX: 3.0,
+  CONTEST_SCORE_MIN: 0,
+  CONTEST_SCORE_MAX: 100,
+  // Five stable, fixed NPC farm names — no online/network features, just a
+  // deterministic roster (see PROJECT.md section 14).
+  CONTEST_NPC_NAMES: ['Riverbend', 'Hillcrest', 'Maple Hollow', 'Stonebridge', 'Cedar Creek'] as const,
+  // Target scores for Contest #1 (Day 7), one per NPC above, in order.
+  // Every later Contest adds CONTEST_NPC_PROGRESSION_PER_CONTEST points to
+  // ALL five targets, capped at a total progression bonus of
+  // CONTEST_NPC_PROGRESSION_CAP — this scaling is a pure function of the
+  // Contest number alone and must never read the player's own stats (see
+  // systems/contest.ts npcTargetsForContestNumber).
+  CONTEST_NPC_BASE_TARGETS: [42, 46, 50, 54, 58] as const,
+  CONTEST_NPC_PROGRESSION_PER_CONTEST: 4,
+  CONTEST_NPC_PROGRESSION_CAP: 20,
+  // Each NPC also gets one small, one-time result variation in this range,
+  // generated/persisted exactly once alongside the rest of that Contest's
+  // result (see PROJECT.md section 14/19 — no reroll on reload).
+  CONTEST_NPC_VARIATION_MIN: -2.5,
+  CONTEST_NPC_VARIATION_MAX: 2.5,
+  // Same fixed prize table for every Contest in V1 (see PROJECT.md section
+  // 16) — index 0 = 1st place, 1 = 2nd, 2 = 3rd; 4th-6th place = $0.
+  CONTEST_PRIZES: [250, 150, 75] as const,
 
   // Mutation chance for offspring visual traits, by child slot
   MUTATION_CHANCE: {
@@ -239,6 +264,13 @@ export type AppleColor = (typeof COLORS)[number];
 
 export const PATTERNS = ['Plain', 'Speckled', 'Striped'] as const;
 export type ApplePattern = (typeof PATTERNS)[number];
+
+// Contest V1's fixed four-type rotation, in cycle order (see PROJECT.md
+// "Contest" and systems/contest.ts) — a standalone export (like AppleColor/
+// ApplePattern above) so systems/contest.ts and types.ts can both import
+// just the type/order without pulling in the rest of TUNING.
+export const CONTEST_TYPES = ['BIGGEST', 'SWEETEST', 'FRESHEST', 'GRAND_CHAMPION'] as const;
+export type ContestType = (typeof CONTEST_TYPES)[number];
 
 // Hex swatches used for procedural apple rendering + UI accents
 export const COLOR_HEX: Record<AppleColor, number> = {

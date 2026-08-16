@@ -1,21 +1,22 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
-import { WEEK1_CALENDAR, type DayDef } from '../systems/calendar.ts';
-import { fairCompositeScore, sweetnessContestScore } from '../systems/economy.ts';
+import { TUNING } from '../tuning.ts';
+import { calendarWindowForDay, getDayDef, type DayDef } from '../systems/calendar.ts';
+import { contestCriteriaLines } from '../systems/contest.ts';
 import { LAYOUT, THEME } from './theme.ts';
-import { Button, panel, text as mkText } from './uiKit.ts';
+import { panel, text as mkText } from './uiKit.ts';
 import { ToastQueue } from './modals.ts';
+
+const ORDINALS = ['1st', '2nd', '3rd', '4th', '5th', '6th'];
 
 export class CalendarScreen extends Phaser.GameObjects.Container {
   private game: Game;
-  private toasts: ToastQueue;
   private content: Phaser.GameObjects.Container;
   private selectedDay: number;
 
-  constructor(scene: Phaser.Scene, game: Game, toasts: ToastQueue) {
+  constructor(scene: Phaser.Scene, game: Game, _toasts: ToastQueue) {
     super(scene, 0, LAYOUT.contentTop);
     this.game = game;
-    this.toasts = toasts;
     this.selectedDay = game.state.day;
     this.content = scene.add.container(0, 0);
     this.add(this.content);
@@ -25,24 +26,27 @@ export class CalendarScreen extends Phaser.GameObjects.Container {
   render(): void {
     this.content.removeAll(true);
     const state = this.game.state;
-    if (this.selectedDay > 7 || this.selectedDay < 1) this.selectedDay = state.day;
+    const window = calendarWindowForDay(state.day);
+    const minDay = window[0].day;
+    const maxDay = window[window.length - 1].day;
+    if (this.selectedDay < minDay || this.selectedDay > maxDay) this.selectedDay = state.day;
 
-    this.drawWeekStrip();
+    this.drawWeekStrip(window);
     this.drawDetails();
   }
 
-  private drawWeekStrip(): void {
+  private drawWeekStrip(window: DayDef[]): void {
     const state = this.game.state;
     const chipW = 216;
     const gap = 8;
     const startX = (LAYOUT.width - (chipW * 7 + gap * 6)) / 2;
 
-    WEEK1_CALENDAR.forEach((def, i) => {
+    window.forEach((def, i) => {
       const x = startX + i * (chipW + gap);
       const isToday = def.day === state.day;
       const isSelected = def.day === this.selectedDay;
       let color = THEME.panelBg2;
-      if (def.event === 'CONTEST_SWEETNESS' || def.event === 'FAIR') color = THEME.gold;
+      if (def.event === 'CONTEST') color = THEME.gold;
       else if (def.scriptedMarket) color = THEME.info;
       if (def.day > state.day) color = 0xb9b39c;
 
@@ -76,8 +80,7 @@ export class CalendarScreen extends Phaser.GameObjects.Container {
   }
 
   private drawDetails(): void {
-    const def = WEEK1_CALENDAR.find((d) => d.day === this.selectedDay);
-    if (!def) return;
+    const def = getDayDef(this.selectedDay);
     const state = this.game.state;
     const panelY = 128;
     const panelH = LAYOUT.contentHeight - panelY - 12;
@@ -90,10 +93,8 @@ export class CalendarScreen extends Phaser.GameObjects.Container {
       return;
     }
 
-    if (def.event === 'CONTEST_SWEETNESS') {
-      this.drawContestUI(def, panelY);
-    } else if (def.event === 'FAIR') {
-      this.drawFairUI(def, panelY);
+    if (def.event === 'CONTEST') {
+      this.drawContestDetail(def, panelY);
     } else {
       this.content.add(mkText(this.scene, 52, panelY + 80, this.flavorFor(def.day), 24, THEME.textMid));
     }
@@ -106,103 +107,53 @@ export class CalendarScreen extends Phaser.GameObjects.Container {
       case 2:
         return 'Yellow apples are selling for a premium today (+30%). Field 2 is now available to purchase.';
       case 3:
-        return 'The Sweetness Contest is tomorrow. Consider breeding or using SWEETEN cultivation to prepare.';
+        return 'The first Contest — BIGGEST APPLE — is on Day 7. Consider breeding for Size.';
       case 5:
         return 'Something unusual is stirring in the orchard today. Try breeding to see what turns up.';
       case 6:
         return 'Purple and Striped apples are in high demand today.';
       default:
-        return '';
+        return 'An ordinary day on the farm.';
     }
   }
 
-  private drawContestUI(def: DayDef, panelY: number): void {
+  // Read-only: entry itself only ever happens through the Closing -> Contest
+  // flow at 18:00 (see PROJECT.md "Contest" sections 11-13), never from
+  // Calendar — this just answers "when is the next Contest, what type, and
+  // (once it's happened) how did it go."
+  private drawContestDetail(def: DayDef, panelY: number): void {
+    const type = def.contestType!;
     const state = this.game.state;
-    const already = state.contestResults.find((r) => r.day === def.day);
-    if (already || state.day4ContestDone) {
-      this.drawResultSummary(already, panelY);
-      return;
-    }
 
-    this.content.add(
-      mkText(this.scene, 52, panelY + 76, 'Submit your sweetest planted variety. Benchmarks: 1st ≥79, 2nd ≥72, 3rd ≥65 sweetness.', 22, THEME.textMid, false, true),
-    );
-
-    let row = 0;
-    for (const field of this.game.unlockedFields()) {
-      const variety = this.game.getVariety(field.varietyId);
-      if (!variety) continue;
-      const score = Math.round(sweetnessContestScore(variety, field.policy));
-      this.drawSubmitRow(panelY + 132 + row * 68, variety.customName, score, () => {
-        const result = this.game.submitSweetnessContest(field.id);
-        if (result) this.announceResult(result.place, result.prize, result.score);
-        this.render();
-      });
-      row++;
-    }
-  }
-
-  private drawFairUI(def: DayDef, panelY: number): void {
-    const state = this.game.state;
-    const already = state.contestResults.find((r) => r.day === def.day);
-    if (already || state.day7FairDone) {
-      this.drawResultSummary(already, panelY);
-      return;
-    }
-
-    this.content.add(
-      mkText(this.scene, 52, panelY + 76, 'Submit your most impressive apple. Score blends sweetness, size, and rarity.', 22, THEME.textMid),
-    );
-
-    let row = 0;
-    for (const field of this.game.unlockedFields()) {
-      const variety = this.game.getVariety(field.varietyId);
-      if (!variety) continue;
-      const score = Math.round(fairCompositeScore(variety, field.policy));
-      this.drawSubmitRow(panelY + 132 + row * 68, variety.customName, score, () => {
-        const result = this.game.submitFair(field.id);
-        if (result) this.announceResult(result.place, result.prize, result.score);
-        this.render();
-      });
-      row++;
-    }
-  }
-
-  private drawSubmitRow(y: number, name: string, score: number, onSubmit: () => void): void {
-    this.content.add(panel(this.scene, 52, y, LAYOUT.width - 104, 56, THEME.panelBg2, THEME.panelBorder, 12));
-    this.content.add(mkText(this.scene, 72, y + 28, `${name}  —  Score ${score}`, 22, THEME.textDark, false, true).setOrigin(0, 0.5));
-    const btn = new Button(this.scene, LAYOUT.width - 200, y + 28, 240, 44, 'SUBMIT', onSubmit, THEME.accent, 20);
-    this.content.add(btn);
-  }
-
-  private drawResultSummary(
-    result: { place: 1 | 2 | 3 | 0; prize: number; score: number; varietyName: string } | undefined,
-    panelY: number,
-  ): void {
-    if (!result) {
-      this.content.add(mkText(this.scene, 52, panelY + 80, 'Already resolved.', 24, THEME.textMid));
-      return;
-    }
-    const placeLabel = result.place === 0 ? 'No placement' : `${result.place === 1 ? '1st' : result.place === 2 ? '2nd' : '3rd'} place!`;
+    this.content.add(mkText(this.scene, 52, panelY + 72, `Judging: ${contestCriteriaLines(type).join('   •   ')}`, 22, THEME.textMid));
     this.content.add(
       mkText(
         this.scene,
         52,
-        panelY + 80,
-        `${result.varietyName} scored ${result.score}. ${placeLabel} ${result.prize > 0 ? `Prize: $${result.prize}` : ''}`,
-        26,
-        THEME.textDark,
-        true,
-        true,
+        panelY + 104,
+        `Prizes: 1st $${TUNING.CONTEST_PRIZES[0]}   •   2nd $${TUNING.CONTEST_PRIZES[1]}   •   3rd $${TUNING.CONTEST_PRIZES[2]}   •   4th-6th $0`,
+        20,
+        THEME.textMid,
       ),
     );
-  }
 
-  private announceResult(place: 1 | 2 | 3 | 0, prize: number, score: number): void {
-    if (place === 0) {
-      this.toasts.show(`No placement this time (score ${score}).`, THEME.danger);
+    const history = state.contestHistory.find((h) => h.day === def.day);
+    let resultText: string;
+    let resultColor = THEME.textDark;
+    if (history) {
+      if (history.rank === null) {
+        resultText = 'No entry was submitted for this Contest.';
+      } else {
+        const place = ORDINALS[history.rank - 1] ?? `${history.rank}th`;
+        resultText = history.prize > 0 ? `Placed ${place} — +$${history.prize}` : `Placed ${place} — no prize`;
+        resultColor = history.rank === 1 ? '#2f5a20' : THEME.textDark;
+      }
+    } else if (def.day === state.day) {
+      resultText = 'Resolves automatically at Closing (18:00) today.';
+      resultColor = '#3b6db2';
     } else {
-      this.toasts.show(`Placed ${place === 1 ? '1st' : place === 2 ? '2nd' : '3rd'}! +$${prize}`, THEME.gold);
+      resultText = 'This Contest has not resolved yet.';
     }
+    this.content.add(mkText(this.scene, 52, panelY + 152, resultText, 24, resultColor, true));
   }
 }

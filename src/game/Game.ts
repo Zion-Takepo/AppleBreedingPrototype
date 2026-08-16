@@ -2,7 +2,7 @@ import { TUNING } from './tuning.ts';
 import type {
   BreedingSpecimen,
   BreedParentRef,
-  ContestResult,
+  ContestState,
   CultivationPolicy,
   DayLogEntry,
   Field,
@@ -15,7 +15,6 @@ import { breedOffspring, statsOf, type BreedParent } from './systems/breeding.ts
 import {
   activeSlotIndices,
   allSlotsActive,
-  fairCompositeScore,
   finalShipmentCadenceSeconds,
   fruitRegrowSeconds,
   makeInitialFruitSlots,
@@ -26,8 +25,18 @@ import {
   priceHarvestedApple,
   shippingCadenceForLevel,
   shippingSpeedUpgradeCost,
-  sweetnessContestScore,
 } from './systems/economy.ts';
+import {
+  contestNumberForDay,
+  contestScore,
+  contestTypeForDay,
+  isContestDay,
+  npcTargetsForContestNumber,
+  prizeForRank,
+  rankContestEntries,
+  rollContestLuck,
+  rollNpcVariation,
+} from './systems/contest.ts';
 import { advanceDailyMarket, initVisualMarket, initVisualMarketEntry } from './systems/market.ts';
 import { realizedShippingValue } from './systems/freshness.ts';
 import { dayTimeRemainingAtClock } from './systems/clock.ts';
@@ -116,9 +125,8 @@ function createInitialState(): GameState {
     // 1->2 transition (see advanceDayInternal), never here.
     visualMarket: initVisualMarket(['C1', 'C2'], 1),
     totalRevenue: 0,
-    contestResults: [],
-    day4ContestDone: false,
-    day7FairDone: false,
+    contest: null,
+    contestHistory: [],
     day5MutationGuaranteeUsed: false,
     day1YellowGuaranteeUsed: false,
     lastDayLog: null,
@@ -164,6 +172,17 @@ export type GameEvent =
   // anchor the one-time Market discoverability hint's fallback trigger (see
   // PROJECT.md "Market discoverability").
   | { type: 'dayAdvanced' }
+  // Contest V1 (see PROJECT.md "Contest"). Fired once Closing's Final
+  // Shipment queue has fully drained on a Contest Day and `state.contest`
+  // has just been created for today — the UI's cue to show the blocking
+  // Contest entry screen (see Game.advanceContestGate).
+  | { type: 'contestGateReached' }
+  // Fired the instant Game.confirmContestEntry generates the FULL Contest
+  // outcome (score/rank/prize) — the UI's cue to show the Results screen.
+  // Settlement itself is deliberately NOT triggered by this event; it only
+  // ever runs from Game.continueFromContestResults (see PROJECT.md section
+  // 11's "do not show EndDayModal before the Contest has completed").
+  | { type: 'contestResolved' }
   | { type: 'changed' };
 
 type Listener = (event: GameEvent) => void;
@@ -422,12 +441,21 @@ export class Game {
       }
 
       // Closing (state.closing) stays true until the accelerated Final
-      // Shipment drain above has fully emptied the shared queue — only then
-      // does settlement actually run, so Final Shipment revenue is always
-      // folded into the closing day's own summary (see finishClosing).
+      // Shipment drain above has fully emptied the shared queue. On a
+      // normal day, settlement runs immediately — same as before Contest
+      // V1. On a Contest Day, settlement is deliberately deferred: it only
+      // ever runs from continueFromContestResults(), called by the UI once
+      // the player has actually seen the Results screen (see PROJECT.md
+      // section 11) — so Final Shipment revenue is still always folded into
+      // the closing day's own summary (see finishClosing), just not until
+      // the Contest itself has fully played out.
       if (this.state.closing && this.state.processingQueue.length === 0) {
-        this.finishClosing();
-        changed = true;
+        if (isContestDay(this.state.day)) {
+          if (this.advanceContestGate()) changed = true;
+        } else {
+          this.finishClosing();
+          changed = true;
+        }
       }
     }
 
@@ -1020,76 +1048,111 @@ export class Game {
   }
 
   // ----------------------------------------------------------------
-  // Contests
+  // Contests (see PROJECT.md "Contest")
   // ----------------------------------------------------------------
-  submitSweetnessContest(fieldId: number): ContestResult | null {
-    if (this.state.day !== TUNING.CONTEST_DAY4.day || this.state.day4ContestDone) return null;
-    const field = this.getField(fieldId);
-    if (!field || !field.varietyId) return null;
-    const variety = this.getVariety(field.varietyId);
-    if (!variety) return null;
 
-    const score = Math.round(sweetnessContestScore(variety, field.policy));
-    const t = TUNING.CONTEST_DAY4;
-    let place: 1 | 2 | 3 | 0 = 0;
-    let prize = 0;
-    if (score >= t.tier1) {
-      place = 1;
-      prize = t.prize1;
-    } else if (score >= t.tier2) {
-      place = 2;
-      prize = t.prize2;
-    } else if (score >= t.tier3) {
-      place = 3;
-      prize = t.prize3;
-    }
-
-    const result: ContestResult = { day: this.state.day, varietyId: variety.id, varietyName: variety.customName, score, place, prize };
-    this.state.contestResults.push(result);
-    this.state.day4ContestDone = true;
-    if (prize > 0) {
-      this.state.cash += prize;
-      this.state.dayContestPrize += prize;
-      const label = place === 1 ? '🏆 Sweetness Champion' : place === 2 ? '🥈 Sweetness Runner-up' : '🥉 Sweetness Finalist';
-      variety.awards.push(`${label} — Day ${this.state.day}`);
-    }
-    this.notify();
-    return result;
+  /**
+   * Eligible Contest entries: permanent Library Lines only (see PROJECT.md
+   * section 6) — never a held Specimen, never a merely-DISCOVERED Visual
+   * with no owned Line. Archived Lines are excluded, same convention as the
+   * normal Parent Picker (see types.ts's Variety.archived doc comment) —
+   * they're never deleted, just hidden from normal selection contexts.
+   */
+  contestEligibleLines(): Variety[] {
+    return this.state.library.filter((l) => !l.archived);
   }
 
-  submitFair(fieldId: number): ContestResult | null {
-    if (this.state.day !== TUNING.FAIR_DAY7.day || this.state.day7FairDone) return null;
-    const field = this.getField(fieldId);
-    if (!field || !field.varietyId) return null;
-    const variety = this.getVariety(field.varietyId);
-    if (!variety) return null;
+  /**
+   * Creates today's ContestState the first time Closing's Final Shipment
+   * queue empties on a Contest Day (called only from update() — see the
+   * `isContestDay` branch there), and no-ops on every later call the same
+   * day. Returns whether it actually created (changed) anything, so the
+   * caller can fold that into its own `changed`/notify() bookkeeping.
+   */
+  private advanceContestGate(): boolean {
+    if (this.state.contest && this.state.contest.day === this.state.day) return false;
+    this.state.contest = {
+      day: this.state.day,
+      type: contestTypeForDay(this.state.day)!,
+      resolved: false,
+      entryLineId: null,
+      playerScore: null,
+      npcResults: null,
+      rank: null,
+      prize: 0,
+    };
+    this.emit({ type: 'contestGateReached' });
+    return true;
+  }
 
-    const score = Math.round(fairCompositeScore(variety, field.policy));
-    const t = TUNING.FAIR_DAY7;
-    let place: 1 | 2 | 3 | 0 = 0;
-    let prize = 0;
-    if (score >= t.tier1) {
-      place = 1;
-      prize = t.prize1;
-    } else if (score >= t.tier2) {
-      place = 2;
-      prize = t.prize2;
-    } else if (score >= t.tier3) {
-      place = 3;
-      prize = t.prize3;
-    }
+  /**
+   * Locks the player's Contest entry (or explicitly no entry — `lineId =
+   * null`, the defensive fallback for a corrupted/legacy save with zero
+   * eligible Lines, see PROJECT.md section 12's "do not softlock" note) and
+   * generates the ENTIRE Contest outcome in this one call: the player's
+   * score (base formula + one luck roll), all 5 NPC scores (fixed
+   * per-Contest target + one small variation roll each), rank, and prize.
+   * Everything is persisted onto `state.contest` before this returns, so a
+   * reload after this point can never re-roll luck/NPC results (see
+   * PROJECT.md sections 13/19) — calling this again once `resolved` is
+   * already true is therefore a safe no-op (returns null), not a reroll.
+   * The selected Line itself is never consumed/mutated/removed — Contest
+   * entry only ever reads a Line's genetics (see PROJECT.md section 6/21).
+   */
+  confirmContestEntry(lineId: string | null): ContestState | null {
+    const contest = this.state.contest;
+    if (!contest || contest.day !== this.state.day || contest.resolved) return null;
+    const line = lineId ? this.getVariety(lineId) : undefined;
+    if (lineId !== null && (!line || line.archived)) return null;
 
-    const result: ContestResult = { day: this.state.day, varietyId: variety.id, varietyName: variety.customName, score, place, prize };
-    this.state.contestResults.push(result);
-    this.state.day7FairDone = true;
+    contest.entryLineId = lineId;
+    contest.playerScore = line ? contestScore(contest.type, line, rollContestLuck()) : null;
+
+    const npcTargets = npcTargetsForContestNumber(contestNumberForDay(contest.day));
+    contest.npcResults = TUNING.CONTEST_NPC_NAMES.map((name, i) => ({
+      name,
+      score: Math.max(TUNING.CONTEST_SCORE_MIN, Math.min(TUNING.CONTEST_SCORE_MAX, npcTargets[i] + rollNpcVariation())),
+    }));
+
+    const entries = [
+      ...(contest.playerScore !== null ? [{ id: 'PLAYER', score: contest.playerScore }] : []),
+      ...contest.npcResults.map((n) => ({ id: n.name, score: n.score })),
+    ];
+    const ranked = rankContestEntries(entries);
+    const rank = contest.playerScore !== null ? ranked.findIndex((e) => e.id === 'PLAYER') + 1 : null;
+    const prize = rank !== null ? prizeForRank(rank) : 0;
+
+    contest.rank = rank;
+    contest.prize = prize;
+    contest.resolved = true;
+
+    // The selected Line itself is never mutated by entering (see PROJECT.md
+    // section 21 — Contest entry only ever READS a Line's genetics) — a
+    // placing result is recorded in contestHistory below instead of on the
+    // Line's own `awards` array.
     if (prize > 0) {
       this.state.cash += prize;
       this.state.dayContestPrize += prize;
-      const label = place === 1 ? '🏆 Apple Fair Champion' : place === 2 ? '🥈 Apple Fair Runner-up' : '🥉 Apple Fair Finalist';
-      variety.awards.push(`${label} — Day ${this.state.day}`);
     }
+    this.state.contestHistory.push({ day: contest.day, type: contest.type, rank, prize });
+
+    this.emit({ type: 'contestResolved' });
     this.notify();
-    return result;
+    return contest;
+  }
+
+  /**
+   * The ONLY path that runs Closing's deferred settlement on a Contest Day
+   * — called by the UI once the player has clicked past the Results screen
+   * (see PROJECT.md section 11/17). Deliberately requires `contest.resolved`
+   * so EndDayModal can never appear before the Contest has completed, and
+   * requires `state.closing` (finishClosing() flips it false) so a second
+   * click/call can never settle twice. Returns whether it actually ran.
+   */
+  continueFromContestResults(): boolean {
+    if (!this.state.closing || !this.state.contest || this.state.contest.day !== this.state.day || !this.state.contest.resolved) return false;
+    this.finishClosing();
+    return true;
   }
 
   // ----------------------------------------------------------------
@@ -1214,7 +1277,7 @@ export class Game {
     // Freshness decay; dayFreshnessLoss (see PROJECT.md "Freshness" section
     // 10) is the exact, unrounded sum of what Freshness decay took back out
     // of those same shipments; dayContestPrize is always an exact
-    // whole-dollar amount (see the CONTEST_DAY4/FAIR_DAY7 prize tables).
+    // whole-dollar amount (see Game.confirmContestEntry / TUNING.CONTEST_PRIZES).
     // Round the LOCKED shipment total to the nearest CENT (not whole
     // dollar) once, then derive harvestRevenue by rounding just that
     // component and marketBonus as the remainder, so the two displayed line
@@ -1284,7 +1347,16 @@ export class Game {
 
   proceedToNextDay(): void {
     if (!this.state.dayEnded) return;
-    if (this.state.day >= 7) {
+    // The one-time "WEEK 1 COMPLETE" gate fires exactly on the Day 7 -> 8
+    // transition (`=== 7`, not `>= 7`) — Contest V1 needs every later day
+    // (8, 9, ..., 35, ...) to advance normally through this same method
+    // instead of re-triggering that gate forever after Day 7, which is what
+    // the original `>= 7` check did (it's true on every day from 7 onward,
+    // so every single day-end past Day 7 would re-show the Week Summary
+    // modal and refuse to actually advance the day until STARTWEEK2 was
+    // clicked again). See PROJECT.md "Contest" for why continuous play
+    // through Day 35+ is required.
+    if (this.state.day === 7) {
       this.state.weekComplete = true;
       this.notify();
       return;

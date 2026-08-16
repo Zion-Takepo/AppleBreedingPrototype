@@ -1,10 +1,12 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
+import type { ContestType } from '../tuning.ts';
 import { APPLE_CATALOG_NUMBER } from '../render/appleAssets.ts';
 import { getDayDef, nextEvent } from '../systems/calendar.ts';
 import { gameClockLabel } from '../systems/clock.ts';
 import { formatMarketPct, strongestMover } from '../systems/market.ts';
 import { openMarketOverview } from './MarketScreen.ts';
+import { openContestInfoModal } from './ContestInfoModal.ts';
 import { LAYOUT, THEME } from './theme.ts';
 import { Button, formatMoney, text as mkText } from './uiKit.ts';
 
@@ -29,6 +31,11 @@ export class HUD extends Phaser.GameObjects.Container {
   // list of popups. A new shipment kills any in-flight tween and restarts
   // the animation from this same object/position.
   private shipmentText: Phaser.GameObjects.Text;
+  // Whichever Contest the NEXT CONTEST / CONTEST TODAY headline currently
+  // describes (see refresh() below) — kept so the click handler can open
+  // the right ContestInfoModal without recomputing it from scratch.
+  private hudContestDay: number | null = null;
+  private hudContestType: ContestType | null = null;
 
   constructor(scene: Phaser.Scene, game: Game, onEndDay: () => void) {
     super(scene, 0, 0);
@@ -45,7 +52,7 @@ export class HUD extends Phaser.GameObjects.Container {
     this.timerText = mkText(scene, 170, y, '', 24, THEME.textGold, false, true).setOrigin(0, 0.5);
     this.cashText = mkText(scene, 350, y, '', 26, '#a8e06a', true, true).setOrigin(0, 0.5);
     this.marketText = mkText(scene, 560, y, '', 24, THEME.textLight).setOrigin(0, 0.5);
-    this.eventText = mkText(scene, 940, y, '', 24, '#cfe8c8').setOrigin(0, 0.5);
+    this.eventText = mkText(scene, 930, y, '', 19, '#cfe8c8').setOrigin(0, 0.5);
     this.add([this.dayText, this.timerText, this.cashText, this.marketText, this.eventText]);
 
     // Market V1's smallest access path: the existing HUD Market headline
@@ -57,6 +64,19 @@ export class HUD extends Phaser.GameObjects.Container {
     marketZone.setInteractive();
     marketZone.on('pointerdown', () => openMarketOverview(scene, game));
     this.add(marketZone);
+
+    // NEXT CONTEST / CONTEST TODAY headline (see PROJECT.md "Contest"
+    // section 8) — clicking it opens a small Contest info modal for
+    // whichever Contest eventText is currently describing (today's, if
+    // pending, otherwise the upcoming one — see refresh() below).
+    const contestZone = scene.add.zone(930, 0, 430, LAYOUT.hudHeight).setOrigin(0, 0);
+    contestZone.setInteractive();
+    contestZone.on('pointerdown', () => {
+      if (this.hudContestDay !== null && this.hudContestType !== null) {
+        openContestInfoModal(scene, this.hudContestDay, this.hudContestType);
+      }
+    });
+    this.add(contestZone);
 
     this.shipmentText = mkText(scene, SHIPMENT_FEEDBACK_X, SHIPMENT_FEEDBACK_Y, '', 20, '#2f5a20', true, true).setOrigin(0, 0);
     this.shipmentText.setAlpha(0);
@@ -131,16 +151,22 @@ export class HUD extends Phaser.GameObjects.Container {
       this.marketText.setText(`Market: #${num} ${formatMarketPct(mover.pct)} ▸`);
     }
 
-    const def = getDayDef(s.day);
-    if (def && def.event !== 'NONE') {
-      this.eventText.setText(`TODAY: ${def.shortLabel}`);
+    // NEXT CONTEST / CONTEST TODAY (see PROJECT.md "Contest" section 8) —
+    // Contest is the only scheduled Calendar event left in V1, so `today`
+    // here is only ever 'CONTEST' or 'NONE'. Once today's Contest has
+    // resolved, this switches back to pointing at the next one, same day or
+    // not (see the `todayPending` check below).
+    const today = getDayDef(s.day);
+    const todayPending = today.event === 'CONTEST' && !(s.contest?.day === s.day && s.contest.resolved);
+    if (todayPending) {
+      this.eventText.setText(`CONTEST TODAY · ${today.title}`);
+      this.hudContestDay = today.day;
+      this.hudContestType = today.contestType ?? null;
     } else {
       const next = nextEvent(s.day);
-      if (next) {
-        this.eventText.setText(`Next: ${next.shortLabel} in ${next.day - s.day}d`);
-      } else {
-        this.eventText.setText('');
-      }
+      this.eventText.setText(`NEXT CONTEST · DAY ${next.day} · ${next.title}`);
+      this.hudContestDay = next.day;
+      this.hudContestType = next.contestType ?? null;
     }
 
     this.endDayBtn.setEnabled(this.game.canEndDay());

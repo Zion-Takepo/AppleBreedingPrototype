@@ -12,8 +12,11 @@ import { showEndDaySummary } from '../ui/EndDayModal.ts';
 import { showWeekSummary } from '../ui/WeekSummaryModal.ts';
 import { DebugPanel } from '../ui/DebugPanel.ts';
 import { OnboardingBanner } from '../ui/OnboardingBanner.ts';
+import { openContestEntryModal } from '../ui/ContestEntryModal.ts';
+import { openContestResultsModal } from '../ui/ContestResultsModal.ts';
 import { APPLE_ASSET_IDS, appleAssetPath, appleTextureKey, catalogLabel } from '../render/appleAssets.ts';
-import { playClosingBeginsCue, playNextDayBeginsCue, playPreClosingWarningCue, unlockAudio } from '../systems/audio.ts';
+import { playClosingBeginsCue, playContestResolvedCue, playNextDayBeginsCue, playPreClosingWarningCue, unlockAudio } from '../systems/audio.ts';
+import { contestTypeForDay, contestTypeLabel, isContestDay } from '../systems/contest.ts';
 import type { DayLogEntry } from '../types.ts';
 
 const REFRESH_INTERVAL_MS = 120;
@@ -24,6 +27,10 @@ const REFRESH_INTERVAL_MS = 120;
 const DAY_FADE_OUT_MS = 300;
 const DAY_LABEL_HOLD_MS = 600;
 const DAY_FADE_IN_MS = 400;
+// Contest Day gets an expanded (but still short — see PROJECT.md "Contest"
+// section 7) hold so "CONTEST DAY! <TYPE>" is actually readable, inside the
+// suggested ~800-1000ms range rather than the normal day's 600ms.
+const CONTEST_DAY_LABEL_HOLD_MS = 900;
 
 // 18:00 Closing cue (see PROJECT.md "18:00 Closing cue") — total on-screen
 // time stays inside the explicit 0.5-1.0s target (150ms in + 500ms hold +
@@ -136,10 +143,27 @@ export class MainScene extends Phaser.Scene {
       // Pre-Closing warning (see PROJECT.md "Pre-Closing warning") — a
       // single compact, non-blocking toast at 17:00 plus a short audio cue;
       // the toast queue itself already handles fade in/out, auto-dismissal,
-      // and serializing against any other toast in flight.
+      // and serializing against any other toast in flight. Contest Day gets
+      // Contest-specific wording instead of the generic warning (see
+      // PROJECT.md "Contest" section 10) — still only the one warning, no
+      // second toast added.
       if (event.type === 'closingWarning') {
         playPreClosingWarningCue();
-        this.toasts.show('CLOSING SOON · 1 HOUR', THEME.gold);
+        const contestToday = isContestDay(this.logic.state.day);
+        this.toasts.show(contestToday ? 'CONTEST IN 1 HOUR · Prepare your best apple.' : 'CLOSING SOON · 1 HOUR', THEME.gold);
+      }
+      // Contest V1 (see PROJECT.md "Contest" sections 11-13) — Closing's
+      // Final Shipment queue just emptied on a Contest Day, so today's
+      // ContestState was just created.
+      if (event.type === 'contestGateReached') {
+        this.showContestEntryFlow();
+      }
+      // The full Contest outcome (score/rank/prize) was just generated —
+      // show the Results screen. Settlement itself only happens once the
+      // player continues past it (see Game.continueFromContestResults).
+      if (event.type === 'contestResolved') {
+        playContestResolvedCue();
+        openContestResultsModal(this, this.logic);
       }
       // 18:00 Closing cue (see PROJECT.md "18:00 Closing cue") — only for
       // the automatic 18:00 trigger; a manual END DAY click already gives
@@ -180,10 +204,24 @@ export class MainScene extends Phaser.Scene {
     // ever show them again — the button just stays disabled ("END DAY ✓")
     // with no way forward. Re-entering the same flow here on load closes
     // that gap without changing the flow itself.
+    // Contest V1's own reload-recovery (see PROJECT.md "Contest" section 19
+    // — same root-cause fix as above, just for the Contest gate/results
+    // window specifically): a reload landing after Closing reached the
+    // Contest gate on today's day, but before settlement has actually run
+    // (`state.closing` still true), re-enters exactly the right screen —
+    // the entry screen if unresolved, the Results screen if already
+    // resolved — instead of leaving the day permanently stuck mid-Contest.
+    const contest = this.logic.state.contest;
+    const contestPendingToday = contest !== null && contest.day === this.logic.state.day && this.logic.state.closing && !this.logic.state.dayEnded;
+
     if (this.logic.state.weekComplete) {
       this.showWeekSummaryFlow();
     } else if (this.logic.state.dayEnded && this.logic.state.lastDayLog) {
       this.showEndDayFlow(this.logic.state.lastDayLog);
+    } else if (contestPendingToday && !contest!.resolved) {
+      this.showContestEntryFlow();
+    } else if (contestPendingToday && contest!.resolved) {
+      openContestResultsModal(this, this.logic);
     }
 
     window.addEventListener('beforeunload', () => this.logic.save());
@@ -260,7 +298,11 @@ export class MainScene extends Phaser.Scene {
   // right after a normal END DAY click and from create() to recover a
   // reload that landed mid-flow (see the comment at that call site).
   private showEndDayFlow(log: DayLogEntry): void {
-    const isLastDay = this.logic.state.day >= 7;
+    // The Week Summary gate (see Game.proceedToNextDay) only ever fires on
+    // the Day 7 -> 8 transition — every later day (Contest or not) uses the
+    // normal "NEXT DAY →" label and advances straight through, so this
+    // button-label special-case stays scoped to exactly that one day too.
+    const isLastDay = this.logic.state.day === 7;
     showEndDaySummary(this, log, isLastDay, () => {
       // Day transition fade (see PROJECT.md "Day transition fade" section
       // 9) wraps the actual day-advance; the Week Summary modal (if this
@@ -300,6 +342,15 @@ export class MainScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(3001)
       .setAlpha(0);
+    // Contest Day expansion of the same DAY N presentation (see PROJECT.md
+    // "Contest" section 7) — a separate, smaller Text kept alongside
+    // dayLabel (never mixed font sizes on one Text object), only populated
+    // and faded in on a Contest Day; empty/invisible every other day.
+    const contestLabel = this.add
+      .text(LAYOUT.width / 2, LAYOUT.height / 2 + 90, '', { fontFamily: THEME.font, fontSize: '30px', color: THEME.textGold, align: 'center' })
+      .setOrigin(0.5, 0)
+      .setDepth(3001)
+      .setAlpha(0);
 
     this.tweens.add({
       targets: overlay,
@@ -317,18 +368,36 @@ export class MainScene extends Phaser.Scene {
 
         // Uses the actual newly-advanced GameState day value — advance()
         // (proceedToNextDay/startNextWeek) has already run by this point.
-        dayLabel.setText(`DAY ${this.logic.state.day}`);
-        dayLabel.setAlpha(1);
+        const newDay = this.logic.state.day;
+        // `contestAlreadyResolvedToday` guards the one pre-existing quirk
+        // this reuses rather than fights: Day 7's own END DAY -> CONTINUE →
+        // button runs this exact transition a SECOND time while `state.day`
+        // is still 7 (see Game.proceedToNextDay's Week-1-complete gate,
+        // which holds the day number steady until START WEEK 2 is clicked)
+        // — without this guard, the Day 7 Contest banner would incorrectly
+        // reappear even though that Contest already resolved earlier the
+        // same day, during Closing.
+        const contestAlreadyResolvedToday = this.logic.state.contest?.day === newDay && this.logic.state.contest.resolved === true;
+        const contestType = contestAlreadyResolvedToday ? null : contestTypeForDay(newDay);
 
-        this.time.delayedCall(DAY_LABEL_HOLD_MS, () => {
+        dayLabel.setText(`DAY ${newDay}`);
+        dayLabel.setAlpha(1);
+        if (contestType) {
+          contestLabel.setText(`CONTEST DAY!\n${contestTypeLabel(contestType)}\n\nPrepare your best apple.`);
+          contestLabel.setAlpha(1);
+        }
+
+        const holdMs = contestType ? CONTEST_DAY_LABEL_HOLD_MS : DAY_LABEL_HOLD_MS;
+        this.time.delayedCall(holdMs, () => {
           playNextDayBeginsCue();
           this.tweens.add({
-            targets: [overlay, dayLabel],
+            targets: [overlay, dayLabel, contestLabel],
             alpha: 0,
             duration: DAY_FADE_IN_MS,
             onComplete: () => {
               overlay.destroy();
               dayLabel.destroy();
+              contestLabel.destroy();
               this.dayTransitionInProgress = false;
               after?.();
             },
@@ -390,6 +459,19 @@ export class MainScene extends Phaser.Scene {
       this.logic.startNextWeek();
       this.refreshAll();
     });
+  }
+
+  // Shared by the live 'contestGateReached' listener and the reload-
+  // recovery check in create() (see PROJECT.md "Contest" section 12's
+  // defensive no-softlock note) — a corrupted/legacy save with zero
+  // eligible Lines skips straight past the entry screen with an explicit
+  // "no entry" outcome instead of showing a selector with nothing to pick.
+  private showContestEntryFlow(): void {
+    if (this.logic.contestEligibleLines().length === 0) {
+      this.logic.confirmContestEntry(null);
+    } else {
+      openContestEntryModal(this, this.logic);
+    }
   }
 
   // Strategic pause (see PROJECT.md "Breed is a strategic pause"): every

@@ -292,12 +292,3 @@ const RARITY_POINTS: Record<string, number> = {
 export function rarityScore(variety: Variety): number {
   return (RARITY_POINTS[variety.color] ?? 0) + (RARITY_POINTS[variety.pattern] ?? 0);
 }
-
-export function fairCompositeScore(variety: Variety, policy: CultivationPolicy): number {
-  const { sweetness, size } = effectiveStats(variety, policy);
-  return sweetness * 0.4 + size * 0.3 + rarityScore(variety);
-}
-
-export function sweetnessContestScore(variety: Variety, policy: CultivationPolicy): number {
-  return effectiveStats(variety, policy).sweetness;
-}

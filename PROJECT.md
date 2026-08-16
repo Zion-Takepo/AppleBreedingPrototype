@@ -1342,17 +1342,32 @@ freshly discovered variety initializes.
 - No upgrade ever raises genetic Sweetness/Size/Yield directly — that's
   breeding's job only.
 
-## Calendar (Week 1, scripted)
+## Calendar
+
+Week 1 (Days 1-6) keeps its original scripted flavor; the old Day 4
+Sweetness Contest and Day 7 Apple Fair placeholders are gone, replaced
+entirely by Contest V1 (see "Contest V1" below), which is what now owns
+every Day-7-and-onward Calendar entry:
 
 | Day | Event |
 |---|---|
 | 1 | First harvest, first (free) breeding, Yellow discovery opportunity |
 | 2 | Yellow market +30%; Field 2 becomes purchasable |
-| 3 | Flavor text previews the Day 4 contest |
-| 4 | **Sweetness Contest** — submit a planted variety; benchmarks 65/72/79 → $80/$180/$350 |
+| 3 | Flavor text previews the Day 7 Contest |
 | 5 | Mutation day — first breeding guarantees Purple or Striped |
 | 6 | Purple +40%, Striped +25% market event |
-| 7 | **Apple Fair** — composite score (sweetness/size/rarity); benchmarks 35/50/65 → $90/$200/$400, then Week 1 Complete summary |
+| 7, 14, 21, 28, 35, ... | **Contest** — see "Contest V1" below for the exact type rotation/schedule |
+
+`systems/calendar.ts`'s `getDayDef(day)` always returns a def for any day
+`>= 1` now (never `undefined`) — Day 4 and every Day past 6 that isn't a
+Contest day falls through to a generic `Day N` / "An ordinary day on the
+farm." entry rather than fabricating scripted content this prototype never
+actually wrote for those days. `CalendarScreen`'s day-chip strip is a
+rolling 7-day window (`calendarWindowForDay(day)`) aligned to 7-day blocks
+starting Day 1 — each block ends on that week's Contest day — instead of a
+table hard-coded to days 1-7, so the Calendar stays useful indefinitely past
+Day 7 (see "Contest V1" section 6 below) rather than freezing on the
+original Week-1 view forever.
 
 One game Day runs on the `TUNING.DAY_DURATION_SEC` (90s) pacing shown as the
 09:00-18:00 clock (see Day Cycle below); reaching 18:00 or clicking END DAY
@@ -1362,21 +1377,245 @@ Closing (`Game.beginClosing()`/`finishClosing()` — see Day Cycle below) ends
 with `GameState.dayEnded=true` and a summary modal shown from the
 `'dayClosed'` event; only that modal's own "NEXT DAY →" button calls
 `proceedToNextDay()`, which resets `dayEnded` and advances the day (or, on
-Day 7, sets `weekComplete` and waits for the Week Summary modal's own
-continue button before actually advancing — `weekComplete` stays true and
-`dayEnded` stays true across that gap too). Both `dayEnded` and
-`weekComplete` are persisted GameState, but the summary modals that gate
-proceeding past them are transient UI only ever triggered by Closing
-finishing — a reload landing between "day ended" and "modal button clicked"
-used to leave the player stuck with a permanently-disabled END DAY button
-and no code path that could ever show the modal again. `MainScene.create()`
-now checks for this on load and re-enters the same flow (reusing the
-persisted `lastDayLog`) so the modal always reappears and the game is never
-trapped. `beginClosing()` itself already no-ops on a second call
+Day 7 **specifically** — `this.state.day === 7`, not `>= 7` — sets
+`weekComplete` and waits for the Week Summary modal's own continue button
+before actually advancing — `weekComplete` stays true and `dayEnded` stays
+true across that gap too). This exact-equality fix is new with Contest V1:
+the original `>= 7` check re-triggered the Week Summary gate on literally
+every single day-end from Day 7 onward, which made it impossible to ever
+actually reach Day 8 without going back through "WEEK 1 COMPLETE"/"START
+WEEK 2" again — harmless as long as nothing needed to exist past Day 7, but
+Contest V1 explicitly requires uninterrupted play through Day 35 and beyond,
+so this was a real, load-bearing bug fix, not a style change (see
+`Game.proceedToNextDay`'s own comment). Both `dayEnded` and `weekComplete`
+are persisted GameState, but the summary modals that gate proceeding past
+them are transient UI only ever triggered by Closing finishing — a reload
+landing between "day ended" and "modal button clicked" used to leave the
+player stuck with a permanently-disabled END DAY button and no code path
+that could ever show the modal again. `MainScene.create()` now checks for
+this on load and re-enters the same flow (reusing the persisted
+`lastDayLog`) so the modal always reappears and the game is never trapped.
+`beginClosing()` itself already no-ops on a second call
 (`this.state.closing || this.state.dayEnded` guard), so repeated END
 DAY/Closing calls were never able to double-charge Operating Cost or
 double-pay Final Shipment revenue (see Day Cycle and Daily Operating Cost
 below).
+
+## Contest V1
+
+**Implemented.** Contest gives the player a concrete goal for the current
+week, gives individual genetic Stats (especially Size, previously the
+weakest-differentiated stat — see "Open playtest findings" below) an
+additional reason to matter, makes the top-HUD NEXT CONTEST area and
+Calendar genuinely useful, and creates another reason to Breed
+strategically before 18:00. It replaces the old, thin Day 4 Sweetness
+Contest / Day 7 Apple Fair placeholder entirely (submit-a-planted-variety-
+mid-day, benchmarks-only scoring, no NPCs) — see `systems/contest.ts`
+(pure schedule/scoring/NPC helpers), `Game.ts`'s `advanceContestGate` /
+`confirmContestEntry` / `continueFromContestResults`, and
+`ui/ContestEntryModal.ts` / `ui/ContestResultsModal.ts` /
+`ui/ContestInfoModal.ts`.
+
+**Schedule** (`isContestDay`/`contestNumberForDay`/`contestTypeForDay`/
+`nextContestDayAfter`, `TUNING.CONTEST_START_DAY` (7) /
+`CONTEST_INTERVAL_DAYS` (7)): Contest begins Day 7, then every 7th day
+after that (14, 21, 28, 35, ...), in a fixed four-type cycle
+(`CONTEST_TYPES` in `tuning.ts`) that repeats indefinitely — never
+randomized, so the player can always see what's coming and Breed toward it:
+
+| Day | Type |
+|---|---|
+| 7 | BIGGEST APPLE |
+| 14 | SWEETEST APPLE |
+| 21 | FRESHEST APPLE |
+| 28 | GRAND CHAMPION |
+| 35 | BIGGEST APPLE (cycle repeats) |
+
+BIGGEST/SWEETEST/FRESHEST judge Size/Sweetness/Freshness respectively;
+GRAND CHAMPION rewards overall genetic quality and balance across all five
+stats instead of one. Yield and Growth deliberately have no dedicated
+Contest of their own in V1 — they already have direct production roles
+(active-slot count, regrow speed).
+
+**Scoring** (`systems/contest.ts` `baseContestScore`/`contestScore`/
+`rollContestLuck`, `TUNING.CONTEST_*`): for the three specialized Contests,
+
+```
+averageStat = (Sweetness+Size+Yield+Growth+Freshness) / 5
+baseScore    = mainStat * 0.85 + averageStat * 0.15
+actualScore  = clamp(baseScore + luck, 0, 100)
+```
+
+(`mainStat` = Size/Sweetness/Freshness for BIGGEST/SWEETEST/FRESHEST). For
+GRAND CHAMPION:
+
+```
+averageStat = (Sweetness+Size+Yield+Growth+Freshness) / 5
+lowestStat  = MIN(Sweetness, Size, Yield, Growth, Freshness)
+baseScore    = averageStat * 0.80 + lowestStat * 0.20
+actualScore  = clamp(baseScore + luck, 0, 100)
+```
+
+`luck` is one shared roll, uniform in `[-3.0, +3.0]`, applied identically to
+every entry (player and NPCs alike — see below). Player-facing criteria
+text (`contestCriteriaLines`, shown on the entry screen, results screen,
+Calendar, and the HUD's Contest info modal) is plain English — "85% Size /
+15% Overall Quality / Small Luck Factor", "80% Overall Quality / 20%
+Balance / Small Luck Factor" for GRAND CHAMPION — never the raw formula.
+Breed math/Sweetness-Size sale formulas are untouched by this pass; Contest
+only ever reads a Line's existing five genetic stats.
+
+**Entry = one owned Line, never consumed** (`Game.contestEligibleLines`):
+at Contest resolution the player chooses exactly one permanent Library Line
+(archived Lines excluded, same convention as the normal Breed Parent
+Picker) to represent them — never a held Specimen, never a merely-
+DISCOVERED-but-unowned Visual, never a standalone Packing-queue item. The
+selected Line is not consumed, deleted, or mutated by entering; nothing is
+deducted from Packing or Specimens. This judges "what Line have you bred,"
+not "did you happen to keep one apple in inventory at 18:00." A defensive
+fallback (`contestEligibleLines().length === 0` — a corrupted/legacy save)
+skips the entry screen and resolves with an explicit no-entry outcome
+(`entryLineId: null`, `rank: null`, `$0` prize) rather than softlocking the
+day.
+
+**NPC competitors** (`TUNING.CONTEST_NPC_NAMES` — Riverbend, Hillcrest,
+Maple Hollow, Stonebridge, Cedar Creek — `npcTargetsForContestNumber`/
+`rollNpcVariation`): PLAYER + 5 NPC farms = 6 total entries. Contest #1's
+(Day 7) NPC target scores are exactly 42/46/50/54/58; every later Contest
+adds `TUNING.CONTEST_NPC_PROGRESSION_PER_CONTEST` (4) points to all five
+targets, capped at a total progression bonus of
+`TUNING.CONTEST_NPC_PROGRESSION_CAP` (20) — so Contest #6 (Day 42) onward
+stays fixed at 62/66/70/74/78 forever. This progression is a pure function
+of the Contest number alone (`npcTargetsForContestNumber(n)` takes no
+player-state argument) — it never reads the player's own Line strength, so
+the player should feel genuine breeding progress actually start beating
+previously-difficult competition, never secretly rubber-banded to match it.
+Each NPC also gets one small one-time result variation
+(`TUNING.CONTEST_NPC_VARIATION_MIN/MAX`, ±2.5), generated/persisted exactly
+once alongside the rest of that Contest's result.
+
+**Result generation happens exactly once, ever** (`Game.confirmContestEntry`):
+confirming ENTER APPLE (or the zero-eligible-Lines fallback) generates the
+ENTIRE outcome in one call — the player's score (base formula + one luck
+roll), all 5 NPC scores, rank, and prize — and persists it immediately onto
+`GameState.contest`. A second `confirmContestEntry` call once
+`contest.resolved` is already true is a guarded no-op (returns `null`), so
+neither a stray double-click nor a save/reload can ever reroll luck or NPC
+results, or pay the prize twice ("reload until I win" is not possible).
+Ranking (`rankContestEntries`) uses full internal (floating-point)
+precision — display always rounds to one decimal
+(`formatContestScore`) — via a stable sort, so an exact internal tie keeps
+build order (PLAYER first, then the 5 NPCs in their fixed roster order) as
+its deterministic tie-break, the same convention `Game.beginClosing`'s own
+highest-value-first collection pass already uses.
+
+**Prizes — V1** (`TUNING.CONTEST_PRIZES`): the same fixed table for every
+Contest — 1st $250, 2nd $150, 3rd $75, 4th-6th $0 — deliberately not scaled
+by Contest number yet; the goal is human Day 7/Day 14 playtesting before a
+balance/progression pass. The prize is non-sale income: it's added to
+`GameState.cash`/`dayContestPrize` (the exact same accumulator the old
+Day 4/Day 7 placeholder already used) and never folded into
+`GameState.totalRevenue`, which keeps its existing gross-lifetime-apple-
+sales-only meaning.
+
+**Closing → Contest → settlement sequence** (`Game.update()`'s
+`isContestDay` branch, `advanceContestGate`/`continueFromContestResults`):
+on a Contest Day, `beginClosing()` and its capacity-aware ripe-fruit
+collection are completely unchanged. Once Final Shipment fully drains the
+Processing Queue (`processingQueue.length === 0` while `state.closing` is
+still true), a normal day would call `finishClosing()` immediately — a
+Contest Day instead creates `GameState.contest` for today (if not already
+present) and emits `'contestGateReached'`, and **deliberately does not
+call `finishClosing()` from `update()` at all while on a Contest day** —
+settlement only ever runs from the explicit `Game.continueFromContestResults()`,
+called by the Results screen's own CONTINUE TO DAY SUMMARY button once the
+player has actually read the result. This is what guarantees the Contest
+never resolves before Final Shipment, and EndDayModal can never appear
+before the Contest has completed — `state.closing` simply stays true (and
+`dayEnded` stays false) for the whole entry/results window, same "still
+mid-Closing" semantics as before this pass, just held open longer. A manual
+END DAY click goes through the exact same `Game.update()` gating as the
+automatic 18:00 trigger, so it follows the identical Contest flow.
+`continueFromContestResults()` itself requires `contest.resolved` and
+`state.closing`, so a second call (or a stray re-click) after settlement
+has already run is a safe no-op — Operating Cost/settlement still only ever
+runs once, exactly as before this pass.
+
+**Persistent state** (`types.ts` `ContestState`/`ContestNpcResult`/
+`ContestHistoryEntry`, `GameState.contest`/`contestHistory`):
+`GameState.contest` holds only the CURRENT/most-recent Contest's full
+detail (day, type, resolved, entryLineId, playerScore, npcResults, rank,
+prize) — it is deliberately never cleared/reset when the day advances (so
+a later day's Calendar/HUD can still show "how did Day 7 go"), which means
+callers always check `contest.day === state.day` before treating it as
+"today's" gate rather than assuming non-null means "pending today."
+`GameState.contestHistory` is a small permanent append-only trail (one
+compact entry per resolved Contest — day/type/rank/prize) used only by the
+Week Summary's "Contest Wins" stat and Calendar's past-result display;
+nothing redundant with `contest` itself is stored twice. Reloading before
+entry resumes the entry screen exactly (state.closing/contest both
+preserved); reloading after entry but before continuing resumes the
+Results screen with the identical persisted outcome; reloading after
+settlement cannot re-apply the prize (settlement itself is guarded, see
+above).
+
+**DAY N Contest-Day presentation** (`MainScene.runDayTransition`): the
+existing DAY N black-screen transition (see "Pre-Closing warning, 18:00
+Closing cue, and Day transition fade" below) expands on a Contest Day —
+"DAY 7", then "CONTEST DAY! / BIGGEST APPLE", then "Prepare your best
+apple." — with a longer ~900ms hold (`CONTEST_DAY_LABEL_HOLD_MS`) instead
+of the normal day's 600ms, still short/not cinematic. A one-tick quirk
+already present before this pass (Day 7's own END DAY → CONTINUE → button
+re-runs this exact transition a second time while `state.day` is still 7,
+because of the Week-1-complete gate described above) is guarded
+(`contestAlreadyResolvedToday`) so the banner never incorrectly reappears
+for a Contest that already resolved earlier the same day — only the plain
+"DAY 7" label shows on that second pass.
+
+**17:00 warning**: the existing single Pre-Closing warning (see "Pre-
+Closing warning" below) swaps to Contest-specific wording on a Contest Day
+— "CONTEST IN 1 HOUR · Prepare your best apple." instead of "CLOSING SOON ·
+1 HOUR" — still exactly one warning, no second toast added, same
+`closingWarning` event/audio cue.
+
+**Top HUD — NEXT CONTEST** (`ui/HUD.ts`): the existing event-headline area
+now reads `NEXT CONTEST · DAY 14 · SWEETEST APPLE` normally, or
+`CONTEST TODAY · BIGGEST APPLE` on an unresolved Contest Day (switching
+back to the normal "next" phrasing the moment that Contest resolves, even
+before the day itself ends). It's clickable — opens
+`ui/ContestInfoModal.ts`, a small read-only modal with the Contest's name,
+day, judging criteria, and prize table.
+
+**Calendar** — see "Calendar" above: the day-chip strip is now a rolling
+7-day window instead of a fixed Days-1-7 table, so it keeps showing "when's
+the next Contest, what type" indefinitely; each Contest day's detail panel
+shows judging criteria, the prize table, and (once resolved) that Contest's
+actual placement/prize from `contestHistory`.
+
+Verification: `scripts/verify-contest.ts` — schedule (Days 1-6 no Contest,
+the exact Day 7/14/21/28/35 type sequence, the cycle repeating at Day 35/42,
+`nextContestDayAfter` before/on/after a Contest day), scoring (both exact
+formulas, luck bounds, higher-main-stat/more-balanced advantages, 0..100
+clamping, display rounding never affecting rank), NPC progression (exact
+Contest #1 targets, the +4/Contest progression, the +20 cap, variation
+bounds, no player-stat dependency), entry eligibility (Library-only,
+archived excluded, Specimens rejected, no mutation of the Library or the
+selected Line, Packing/Specimens untouched, locks after confirmation, no
+reroll on a second call), the full Closing → Contest-gate →
+entry/resolution → `continueFromContestResults` → settlement control flow
+(including the manual-END-DAY path and the "settlement never happens twice"
+guard), prizes (exact table, cash increases once, End Day Contest Prize/Net
+integration, `totalRevenue` untouched, Operating Cost unchanged), and save
+migration (old saves default `contest: null`/`contestHistory: []`,
+mid-gate/mid-results reload resumption, no prize duplication) — re-run
+alongside every other `verify-*.ts` script, all still green. The DAY N
+Contest presentation, the 17:00 Contest wording, the NEXT CONTEST HUD
+headline/info-modal click, and the entry/results screens' actual on-screen
+rendering and click-through are Phaser-rendered/browser-only concerns not
+exercised by that Node script; see the implementation report for the manual
+browser pass performed alongside it (a full multi-week Day 1 → Day 14 run,
+including a real BIGGEST APPLE entry/result and arrival at the correctly-
+scheduled SWEETEST APPLE Contest, with zero console errors).
 
 ## Day Cycle
 
@@ -1665,9 +1904,16 @@ several further issues, judged important but out of scope for that pass.
 Recorded here so intent isn't lost before each is actually decided/built —
 do not build ahead of the priority order below.
 
-- **Sweetness vs. Size**: both stats currently mostly do the same thing
-  (increase apple value) — the distinction between them is weak. Needs a
-  future differentiation pass. Breed math/formula untouched for now.
+- **Sweetness vs. Size**: both stats currently mostly do the same thing for
+  sale value (increase apple value) — that specific distinction is still
+  weak. Contest V1 (see "Contest V1" above) now gives Size a genuinely
+  distinct strategic objective of its own (BIGGEST APPLE judges 85% Size),
+  separate from Sweetness's own SWEETEST APPLE Contest — this is real
+  progress, not a full fix: it doesn't touch the underlying sale-value
+  formula, and does not claim all Sweetness/Size differentiation is
+  permanently solved. A future differentiation pass (if the sale-value
+  overlap itself still needs addressing after playtesting Contest) remains
+  open. Breed math/sale-value formula untouched for now.
 - **Cultivation** (NORMAL / SWEETEN / GROW_BIG): rarely used in practice and
   its purpose isn't obviously communicated. Needs a decision — strengthen
   it, redesign it, fold it into onboarding later, or simplify/remove it.
@@ -1683,10 +1929,15 @@ do not build ahead of the priority order below.
   showing the current probability of which Rare/Epic mutation Visuals can
   appear on the currently planted farm, including Mutation Affinity. Not
   implemented.
-- **Contest**: the Day 4 Sweetness Contest / Day 7 Apple Fair presentation
-  exists but the underlying gameplay loop isn't meaningfully developed.
-  Needs an explicit KEEP / expand / remove decision rather than being left
-  as a half-finished feature indefinitely.
+- **Contest**: Contest V1 implemented (see "Contest V1" above) — the
+  previous "keep/implement/remove decision needed" finding is resolved.
+  Human Day 7 / Day 14 (and beyond) balance/retention playtesting is still
+  needed: whether the fixed V1 prize table feels right, whether the NPC
+  target progression is well-paced, whether players actually Breed toward
+  an upcoming Contest, and whether GRAND CHAMPION's balance-reward framing
+  lands. None of that is claimed solved by this pass — see "Contest V1"'s
+  own verification section for exactly what is/isn't covered by automated
+  checks.
 - **Calendar**: limited functional value today beyond the week strip.
   Possible future direction is a more genuinely calendar-like grid view, but
   readability needs evaluating first. Not redesigned in this pass.
@@ -1712,15 +1963,19 @@ do not build ahead of the priority order below.
 
 Shipping Pipeline, Day Cycle, Daily Operating Cost, Market V1 (incl. its
 graph clarity pass), Orchard Mutation / Breeding Specimen, Shipping
-Infrastructure V1 (Packing Capacity / Shipping Speed), Freshness V1, and
+Infrastructure V1 (Packing Capacity / Shipping Speed), Freshness V1,
 First-session onboarding / Pre-Closing warning / Closing cue / Day
-transition fade / Packing retune are done (see their sections above) —
-remaining order:
+transition fade / Packing retune, and Contest V1 are done (see their
+sections above) — remaining order:
 
-1. Human first-session + Week 1/Week 2 playtest (validating this pass)
+1. Human first-session + Week 1/Week 2+ playtest (validating this pass,
+   including Contest V1's own Day 7/Day 14 balance/retention questions —
+   see "Contest V1"'s "Human browser test target" note in the
+   implementation report)
 2. Balance decisions from that playtest — Sweetness vs. Size, Cultivation,
-   Breed TOTAL variation, Packing/Freshness tuning, Contest keep/cut
-   decision (see "Open playtest findings" above for each)
+   Breed TOTAL variation, Packing/Freshness tuning, Contest V1 prize/NPC
+   pacing (see "Open playtest findings" above for each — Contest's own
+   keep/implement/remove decision is now resolved, see "Contest V1" above)
 3. Orchard / global UI redesign
 4. Collection / Library / Replant cleanup
 5. Atmosphere / animation / audio polish

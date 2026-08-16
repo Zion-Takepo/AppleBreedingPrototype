@@ -16,7 +16,7 @@ export function showWeekSummary(scene: Phaser.Scene, game: Game, onStartWeek2: (
   const fieldsOwned = game.unlockedFields().length;
   const varietiesCreated = state.library.length - 2;
   const traitsDiscovered = state.discoveredColors.length + state.discoveredPatterns.length;
-  const contestWins = state.contestResults.filter((r) => r.place === 1).length;
+  const contestWins = state.contestHistory.filter((r) => r.rank === 1).length;
   const highestGen = Math.max(...state.library.map((v) => v.generation));
   const rarest = state.library.reduce((best, v) => (rarityScore(v) > rarityScore(best) ? v : best), state.library[0]);
 

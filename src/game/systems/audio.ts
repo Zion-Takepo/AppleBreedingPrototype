@@ -105,3 +105,12 @@ export function playNextDayBeginsCue(): void {
     { freq: 659, offset: 0.12, duration: 0.2 },
   ]);
 }
+
+/** Contest result reveal cue (see PROJECT.md "Contest" section 17) — a short three-note flourish, distinct from the other three cues, played once the Results screen appears. */
+export function playContestResolvedCue(): void {
+  playNotes([
+    { freq: 587, offset: 0, duration: 0.12 },
+    { freq: 740, offset: 0.11, duration: 0.12 },
+    { freq: 880, offset: 0.22, duration: 0.24 },
+  ]);
+}
