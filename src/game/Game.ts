@@ -49,6 +49,7 @@ import {
   generateSpecimenStats,
   rollOrchardSpecimen,
 } from './systems/specimen.ts';
+import { STAT_KEYS, generateExceptionalSpecimen, type StatSet } from './systems/exceptional.ts';
 import type { AppleAssetId } from './render/appleAssets.ts';
 
 // Pre-Closing warning threshold, computed once from the digital clock
@@ -377,7 +378,7 @@ export class Game {
               // Day-3+ random Specimen appearance (see PROJECT.md section 4):
               // rolled the instant this fruit becomes ripe, never later at
               // harvest time, so save/reload can never reroll it.
-              if (sourceVariety) this.maybeGenerateRandomSpecimen(slot, sourceVariety);
+              if (sourceVariety) this.maybeGenerateRandomSpecimen(slot, sourceVariety, field.policy);
             }
           }
         }
@@ -638,13 +639,68 @@ export class Game {
    * 4) — called the instant an ordinary fruit slot becomes ripe. Folds in
    * the planted Line's own Rare/Epic Mutation Affinity, if any (see
    * systems/specimen.ts rollOrchardSpecimen). Safe no-op (ordinary fruit)
-   * if nothing fires or no valid alternate Visual exists.
+   * if nothing fires or no valid alternate Visual exists. The Genetic
+   * Exceptional roll (see maybeGenerateExceptionalSpecimen below) is only
+   * ever attempted when this existing Visual Mutation roll does NOT fire —
+   * a single fruit can never be both (see PROJECT.md "Exceptional Specimen
+   * genetics core" integration, section 2).
    */
-  private maybeGenerateRandomSpecimen(slot: FieldFruitSlot, sourceVariety: Variety): void {
+  private maybeGenerateRandomSpecimen(slot: FieldFruitSlot, sourceVariety: Variety, policy: CultivationPolicy): void {
     const roll = rollOrchardSpecimen(this.state.day, sourceVariety.baseVisualId, sourceVariety.visualId, this.state.discoveredVisualIds);
-    if (!roll) return;
-    slot.specimen = this.buildSpecimen(roll.visualId, sourceVariety);
-    if (this.registerVisualDiscovery(roll.visualId)) this.state.hasUnseenDiscovery = true;
+    if (roll) {
+      slot.specimen = this.buildSpecimen(roll.visualId, sourceVariety);
+      if (this.registerVisualDiscovery(roll.visualId)) this.state.hasUnseenDiscovery = true;
+      return;
+    }
+    const exceptional = this.maybeGenerateExceptionalSpecimen(sourceVariety, policy);
+    if (exceptional) slot.specimen = exceptional;
+  }
+
+  /**
+   * Day-3+ Genetic Exceptional roll (see PROJECT.md "Exceptional Specimen
+   * genetics core" and systems/exceptional.ts) — a separate, independent
+   * 0.6% (`TUNING.EXCEPTIONAL_OCCURRENCE_CHANCE`) roll attempted only when
+   * the ripened fruit did NOT already produce a Visual Mutation specimen
+   * above. Source genetics are the planted Line's own five Stats; the
+   * Field's current Cultivation policy is passed straight through so the
+   * genetics core's own focus-bias applies (see selectFocusStat) — it never
+   * changes the occurrence chance itself. A result identical to the source
+   * Line's own Stats (the genetics core's valid 360-cap HIGH_POTENTIAL
+   * fallback) is deliberately treated as an ordinary, non-Specimen fruit
+   * rather than a hollow "EXCEPTIONAL" reveal — no reroll/retry. Visual
+   * identity is always the source Line's own ordinary production visual
+   * (`baseVisualId`), never its special `visualId` — an Exceptional apple
+   * looks exactly like the rest of the crop (see PROJECT.md section 6).
+   */
+  private maybeGenerateExceptionalSpecimen(sourceVariety: Variety, policy: CultivationPolicy): BreedingSpecimen | null {
+    if (this.state.day < TUNING.EXCEPTIONAL_START_DAY) return null;
+    if (Math.random() >= TUNING.EXCEPTIONAL_OCCURRENCE_CHANCE) return null;
+
+    const source: StatSet = {
+      sweetness: sourceVariety.sweetness,
+      size: sourceVariety.size,
+      yieldStat: sourceVariety.yieldStat,
+      growth: sourceVariety.growth,
+      freshness: sourceVariety.freshness,
+    };
+    const result = generateExceptionalSpecimen(source, policy);
+    if (STAT_KEYS.every((k) => result.stats[k] === source[k])) return null;
+
+    return {
+      id: crypto.randomUUID(),
+      visualId: sourceVariety.baseVisualId,
+      baseVisualId: sourceVariety.baseVisualId,
+      sweetness: result.stats.sweetness,
+      size: result.stats.size,
+      yieldStat: result.stats.yieldStat,
+      growth: result.stats.growth,
+      freshness: result.stats.freshness,
+      foundDay: this.state.day,
+      sourceLineId: sourceVariety.id,
+      sourceGeneration: sourceVariety.generation,
+      exceptionalArchetype: result.archetype,
+      exceptionalFocusStat: result.focusStat,
+    };
   }
 
   /** Builds a breeding-parent view of a held Specimen — color/pattern are borrowed from its source Line (a Specimen doesn't persist its own; see types.ts's BreedingSpecimen doc comment), falling back to a neutral default only if that Line is somehow gone. `baseVisualId` is already correct on the specimen itself (set once at creation — see buildSpecimen), so it's simply passed through. */

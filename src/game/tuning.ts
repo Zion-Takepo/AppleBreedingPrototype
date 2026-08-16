@@ -264,6 +264,12 @@ export const TUNING = {
   // EXCEPTIONAL_OCCURRENCE_CHANCE — it's defined/tested here only so the
   // later Orchard->Specimen integration pass has an agreed-upon constant to
   // read rather than inventing one then.
+  // Exceptional eligibility's OWN start day — deliberately separate from
+  // SPECIMEN_RANDOM_START_DAY (the unrelated Visual Mutation Common/Rare/
+  // Epic gate) even though both currently equal 3, so tuning one can never
+  // silently retune the other. Gameplay integration (Game.ts
+  // maybeGenerateExceptionalSpecimen) reads ONLY this constant.
+  EXCEPTIONAL_START_DAY: 3,
   EXCEPTIONAL_OCCURRENCE_CHANCE: 0.006, // 0.6%, unused by current gameplay
   // Cumulative-threshold weights consumed in this exact order by
   // systems/exceptional.ts's selectArchetype — must sum to 1.

@@ -83,6 +83,13 @@ class FruitSlot {
   private scene: Phaser.Scene;
   private apple: AppleVisual;
   private hooks: HarvestHooks;
+  // Minimal ring indicator for a ripe Genetic Exceptional fruit only (see
+  // PROJECT.md "Exceptional Specimen genetics core" section 12) — a plain
+  // Graphics stroke, child of the same pivot as the apple so it inherits
+  // reveal/hide/harvest-pop for free without any extra wiring. No text, no
+  // particles, no sound — a very gentle alpha pulse only.
+  private exceptionalRing: Phaser.GameObjects.Graphics;
+  private exceptionalPulseTween?: Phaser.Tweens.Tween;
   revealed = false;
   private revealing = false;
   private consumed = false;
@@ -98,6 +105,9 @@ class FruitSlot {
     this.pivot = scene.add.container(offsetX, offsetY - FRUIT_PIVOT_RADIUS);
     this.apple = new AppleVisual(scene, 0, FRUIT_PIVOT_RADIUS, ORCHARD_APPLE_BASE_PX);
     this.pivot.add(this.apple);
+    this.exceptionalRing = scene.add.graphics();
+    this.exceptionalRing.setVisible(false);
+    this.pivot.add(this.exceptionalRing);
     this.pivot.setScale(0);
     this.pivot.setAlpha(0);
 
@@ -113,6 +123,32 @@ class FruitSlot {
 
   setTraits(visualId: Variety['visualId'], size: number): void {
     this.apple.draw({ visualId, size });
+  }
+
+  /** Toggles the minimal ripe-Exceptional ring (see class doc comment above). */
+  setExceptional(active: boolean): void {
+    if (active) {
+      this.exceptionalRing.clear();
+      this.exceptionalRing.lineStyle(3, 0xf6e2a8, 0.9);
+      this.exceptionalRing.strokeCircle(0, FRUIT_PIVOT_RADIUS, FRUIT_PIVOT_RADIUS + 14);
+      this.exceptionalRing.setVisible(true);
+      this.exceptionalRing.setAlpha(1);
+      if (!this.exceptionalPulseTween) {
+        this.exceptionalPulseTween = this.scene.tweens.add({
+          targets: this.exceptionalRing,
+          alpha: 0.55,
+          duration: 900,
+          yoyo: true,
+          repeat: -1,
+          ease: 'Sine.easeInOut',
+        });
+      }
+    } else {
+      this.exceptionalPulseTween?.stop();
+      this.exceptionalPulseTween = undefined;
+      this.exceptionalRing.setVisible(false);
+      this.exceptionalRing.setAlpha(1);
+    }
   }
 
   showInstantly(): void {
@@ -376,6 +412,10 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
       const key = specimen ? `specimen:${specimen.id}` : `line:${variety.id}:${Math.round(size)}`;
       if (hardReset || this.lastSlotVisualKey[i] !== key) {
         this.allSlots[i].setTraits(visualId, size);
+        // Genetic Exceptional fruit is a normal production visual (see
+        // PROJECT.md section 6), never a Visual Mutation — the ring is the
+        // only thing distinguishing it on the tree (see section 12).
+        this.allSlots[i].setExceptional(!!specimen?.exceptionalArchetype);
         this.lastSlotVisualKey[i] = key;
       }
     });

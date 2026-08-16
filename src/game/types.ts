@@ -1,5 +1,6 @@
 import type { AppleColor, ApplePattern, ContestType } from './tuning.ts';
 import type { AppleAssetId } from './render/appleAssets.ts';
+import type { ExceptionalArchetype, StatKey } from './systems/exceptional.ts';
 
 export type CultivationPolicy = 'NORMAL' | 'SWEETEN' | 'GROW_BIG';
 
@@ -98,6 +99,15 @@ export interface BreedingSpecimen {
   foundDay: number;
   sourceLineId: string;
   sourceGeneration: number;
+  // Genetic Exceptional metadata (see PROJECT.md "Exceptional Specimen
+  // genetics core" and systems/exceptional.ts) — set only for a Specimen
+  // produced by the Day-3+ 0.6% Exceptional roll, using the pure genetics-
+  // core's own archetype/focus types directly rather than a duplicated
+  // string union. Undefined for an ordinary Visual Mutation specimen
+  // (Common/Rare/Epic) and for every specimen persisted before this pass —
+  // never reinterpreted retroactively.
+  exceptionalArchetype?: ExceptionalArchetype;
+  exceptionalFocusStat?: StatKey | null;
 }
 
 export type BreedParentKind = 'LINE' | 'SPECIMEN';

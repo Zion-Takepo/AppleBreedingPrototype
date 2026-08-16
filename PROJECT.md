@@ -2005,12 +2005,16 @@ visual redesign follows once that connective loop exists, not before.
 
 ## Exceptional Specimen genetics core
 
-**Genetics core implemented but NOT YET connected to gameplay.** A small,
-isolated foundation pass — `src/game/systems/exceptional.ts` — answering
-only "given a source Line's five Stats, can we generate interesting, valid
-Exceptional genetic outliers with deterministic/testable rules?" No Phaser
-imports, no GameState mutation, no save logic; verified standalone by
-`scripts/verify-exceptional-genetics.ts`.
+**Genetics core implemented; Orchard → persisted FruitSlot → Specimen
+inventory → existing Breed integration implemented; final reveal/polish UX
+still pending.** The pure genetics math lives in
+`src/game/systems/exceptional.ts` — "given a source Line's five Stats, can
+we generate interesting, valid Exceptional genetic outliers with
+deterministic/testable rules?" No Phaser imports, no GameState mutation, no
+save logic in that module itself; verified standalone by
+`scripts/verify-exceptional-genetics.ts`. The gameplay wiring described
+below lives in `Game.ts` and is verified by
+`scripts/verify-exceptional-integration.ts`.
 
 Three archetypes, rolled by `TUNING.EXCEPTIONAL_ARCHETYPE_WEIGHTS` (cumulative
 thresholds, see `selectArchetype`): **TRAIT_OUTLIER** 60% (one focus Stat
@@ -2028,6 +2032,62 @@ GROW_BIG is Size 60% / others 10% each. HIGH_POTENTIAL has no focus Stat, so
 Cultivation doesn't affect it. Cultivation never changes the 0.6%
 occurrence chance itself — a fully separate roll.
 
+**Gameplay integration** (`Game.ts` `maybeGenerateRandomSpecimen` /
+`maybeGenerateExceptionalSpecimen`, called the instant a fruit slot becomes
+ripe, same as every other Specimen roll — never rerolled on reload/screen
+change/Closing):
+
+- **Day 3+ only** (`TUNING.EXCEPTIONAL_START_DAY`, its own dedicated
+  constant — deliberately decoupled from `TUNING.SPECIMEN_RANDOM_START_DAY`,
+  the separate gate the existing Visual Mutation roll uses, even though both
+  currently equal 3) — never Day 1 or Day 2, whose fruit is handled entirely
+  by the separate guaranteed-Specimen path and never reaches this roll at
+  all.
+- **Priority order per ripened fruit**: the existing Day-1/Day-2 guarantee
+  (unaffected, unchanged), then the existing Visual Mutation Common/Rare/
+  Epic roll (`rollOrchardSpecimen`, including Mutation Affinity, unchanged)
+  — ONLY if that fruit still has no specimen is the Exceptional roll
+  (`TUNING.EXCEPTIONAL_OCCURRENCE_CHANCE`, 0.6%) attempted. A fruit can
+  never be both a Visual Mutation Specimen and a Genetic Exceptional
+  Specimen.
+- **Source genetics**: the planted Field's source Line's own five Stats.
+  **Cultivation**: the Field's current policy is passed straight into
+  `generateExceptionalSpecimen` so the existing focus bias applies — this
+  never touches the 0.6% occurrence chance itself.
+- **Meaningless-result guard**: if the generated Stats are exactly
+  identical to the source Line's Stats (HIGH_POTENTIAL's valid 360-cap
+  fallback), no Exceptional Specimen is created — the fruit is treated as
+  ordinary. No reroll, no retry, no alternate archetype.
+- **Visual identity**: always the source Line's own ordinary production
+  visual (`sourceLine.baseVisualId`), for both `visualId` and
+  `baseVisualId` on the resulting Specimen — never the Line's special
+  identity `visualId`. A Rare/Epic Line's Exceptional apple looks exactly
+  like its ordinary crop; Rare/Epic recurrence remains controlled only by
+  the existing Visual Mutation + Affinity system.
+- **Representation**: the existing `BreedingSpecimen` model, extended with
+  two optional fields — `exceptionalArchetype?` / `exceptionalFocusStat?`
+  (using `systems/exceptional.ts`'s own `ExceptionalArchetype`/`StatKey`
+  types directly) — both `undefined` for every ordinary Visual Mutation
+  specimen and every specimen persisted before this pass. No new inventory
+  type, no reinterpretation of old specimens.
+- **Harvest/Packing/HARVEST ALL**: unchanged — a Genetic Exceptional
+  Specimen goes through the exact same `harvestFruitSlot` path every other
+  Specimen already uses (added to `GameState.specimens`, never Packing/
+  sale/Freshness, capacity-exempt, collected first by Closing and by
+  HARVEST ALL), since that path already treats any non-null
+  `FieldFruitSlot.specimen` uniformly regardless of its optional metadata.
+- **Breed**: no new Breed logic — a harvested Exceptional is just another
+  held `BreedingSpecimen` in the existing SPECIMENS parent picker, subject
+  to the same one-use/consumption rules as any other Specimen.
+- **Contest**: unaffected — Exceptional Specimens remain ineligible;
+  Contest only ever accepts permanent Library Lines.
+- **Orchard indicator**: a thin warm-gold ring (`OrchardTreeLayer.ts`
+  `FruitSlot.setExceptional`), drawn around a ripe Exceptional fruit only,
+  with a very gentle alpha pulse — no text, no particles, no sound, no
+  change to the fruit's hitbox or normal appearance. This is intentionally
+  the ONLY player-facing signal for this pass; the full reveal/polish UX
+  (acquisition modal, stat-delta feedback, badges, SFX) is a later pass.
+
 **360-cap behavior** (`TUNING.EXCEPTIONAL_TOTAL_CAP`): every generator
 clamps each Stat 0..100 and TOTAL <=360, degrading gracefully rather than
 failing — a focus increase that would exceed 100 applies only the feasible
@@ -2038,12 +2098,15 @@ unchanged source as its valid fallback. No unbounded/regenerate-and-retry
 loops anywhere — redistribution is a single proportional-scale pass, with a
 small bounded corrective step only for rare integer-rounding overflow.
 
-**NOT YET IMPLEMENTED** (next planned pass — Exceptional Orchard → Specimen
-integration):
-- Orchard rolling (nothing currently reads `EXCEPTIONAL_OCCURRENCE_CHANCE`)
-- FruitSlot persistence
-- Specimen acquisition / inventory
-- Breed integration
-- Orchard visual/reveal UX (sparkle/ring effects, audio)
+**NOT YET IMPLEMENTED** (next planned pass — Exceptional discovery/reveal
+UX):
+- Polished Exceptional acquisition reveal (modal, "EXCEPTIONAL APPLE!")
+- Focus/TOTAL delta feedback (e.g. "SIZE +14", "TOTAL +6")
+- Trait/High/Elite badge UI
+- Source-Line comparison UX
+- Dedicated Exceptional SFX
+- Final sparkle/elaborate-pulse presentation beyond the current minimal ring
 
-Not playable yet — this pass is genetics math only.
+Playable now: an Exceptional Specimen can appear on a tree Day 3+, survive
+reload unchanged, be harvested as a one-use Specimen, and work through the
+existing Breed system — see "Gameplay integration" above.
