@@ -106,6 +106,15 @@ export function playNextDayBeginsCue(): void {
   ]);
 }
 
+/** Genetic Exceptional acquisition cue (see PROJECT.md "Exceptional discovery/reveal UX") — a brief, bright ascending sparkle in a higher register than the other three cues, played once per Exceptional Specimen harvested (see MainScene's 'specimenAcquired' handler). Rare-discovery feel, not a general harvest SFX — nothing else in the Orchard triggers this. */
+export function playExceptionalFoundCue(): void {
+  playNotes([
+    { freq: 784, offset: 0, duration: 0.1 },
+    { freq: 988, offset: 0.08, duration: 0.1 },
+    { freq: 1319, offset: 0.16, duration: 0.24 },
+  ]);
+}
+
 /** Contest result reveal cue (see PROJECT.md "Contest" section 17) — a short three-note flourish, distinct from the other three cues, played once the Results screen appears. */
 export function playContestResolvedCue(): void {
   playNotes([

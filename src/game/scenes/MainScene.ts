@@ -15,8 +15,9 @@ import { OnboardingBanner } from '../ui/OnboardingBanner.ts';
 import { openContestEntryModal } from '../ui/ContestEntryModal.ts';
 import { openContestResultsModal } from '../ui/ContestResultsModal.ts';
 import { APPLE_ASSET_IDS, appleAssetPath, appleTextureKey, catalogLabel } from '../render/appleAssets.ts';
-import { playClosingBeginsCue, playContestResolvedCue, playNextDayBeginsCue, playPreClosingWarningCue, unlockAudio } from '../systems/audio.ts';
+import { playClosingBeginsCue, playContestResolvedCue, playExceptionalFoundCue, playNextDayBeginsCue, playPreClosingWarningCue, unlockAudio } from '../systems/audio.ts';
 import { contestTypeForDay, contestTypeLabel, isContestDay } from '../systems/contest.ts';
+import { formatExceptionalReveal } from '../systems/exceptionalReveal.ts';
 import type { DayLogEntry } from '../types.ts';
 
 const REFRESH_INTERVAL_MS = 120;
@@ -38,6 +39,12 @@ const CONTEST_DAY_LABEL_HOLD_MS = 900;
 const CLOSING_CUE_IN_MS = 150;
 const CLOSING_CUE_HOLD_MS = 500;
 const CLOSING_CUE_OUT_MS = 200;
+
+// Genetic Exceptional acquisition reveal (see PROJECT.md "Exceptional
+// discovery/reveal UX") — held longer than a normal toast's default 1800ms
+// since it carries several lines to actually read (archetype, a stat/TOTAL
+// delta, the "saved as breeding specimen" line).
+const EXCEPTIONAL_REVEAL_HOLD_MS = 3200;
 
 export class MainScene extends Phaser.Scene {
   private logic!: Game;
@@ -123,7 +130,19 @@ export class MainScene extends Phaser.Scene {
         this.toasts.show('New trait discovered!', THEME.gold);
       }
       if (event.type === 'specimenAcquired') {
-        this.toasts.show(`SPECIMEN ACQUIRED — ${catalogLabel(event.specimen.visualId)}`, THEME.gold);
+        if (event.specimen.exceptionalArchetype) {
+          // Source Line's CURRENT Stats, looked up live — see
+          // formatExceptionalReveal's own doc comment for why (and its safe
+          // degradation to absolute values if the Line is somehow gone).
+          const sourceLine = this.logic.getVariety(event.specimen.sourceLineId);
+          const sourceStats = sourceLine
+            ? { sweetness: sourceLine.sweetness, size: sourceLine.size, yieldStat: sourceLine.yieldStat, growth: sourceLine.growth, freshness: sourceLine.freshness }
+            : undefined;
+          this.toasts.show(formatExceptionalReveal(event.specimen, sourceStats), THEME.gold, EXCEPTIONAL_REVEAL_HOLD_MS);
+          playExceptionalFoundCue();
+        } else {
+          this.toasts.show(`SPECIMEN ACQUIRED — ${catalogLabel(event.specimen.visualId)}`, THEME.gold);
+        }
       }
       if (event.type === 'packingFull') {
         const now = this.time.now;

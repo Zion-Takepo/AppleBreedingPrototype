@@ -2005,9 +2005,10 @@ visual redesign follows once that connective loop exists, not before.
 
 ## Exceptional Specimen genetics core
 
-**Genetics core implemented; Orchard → persisted FruitSlot → Specimen
-inventory → existing Breed integration implemented; final reveal/polish UX
-still pending.** The pure genetics math lives in
+**Genetics core, Orchard → persisted FruitSlot → Specimen inventory →
+existing Breed integration, AND the discovery/reveal UX are all implemented
+— Exceptional V1 is complete enough for human Day1→Day7 playtesting.** The
+pure genetics math lives in
 `src/game/systems/exceptional.ts` — "given a source Line's five Stats, can
 we generate interesting, valid Exceptional genetic outliers with
 deterministic/testable rules?" No Phaser imports, no GameState mutation, no
@@ -2083,10 +2084,12 @@ change/Closing):
   Contest only ever accepts permanent Library Lines.
 - **Orchard indicator**: a thin warm-gold ring (`OrchardTreeLayer.ts`
   `FruitSlot.setExceptional`), drawn around a ripe Exceptional fruit only,
-  with a very gentle alpha pulse — no text, no particles, no sound, no
-  change to the fruit's hitbox or normal appearance. This is intentionally
-  the ONLY player-facing signal for this pass; the full reveal/polish UX
-  (acquisition modal, stat-delta feedback, badges, SFX) is a later pass.
+  with a very gentle alpha pulse, plus 3 tiny sparkle glints
+  (`drawSparkle`/`GLINT_COUNT`) twinkling at staggered offsets just outside
+  the ring — small enough to never obscure the apple itself, no particle
+  system, no change to the fruit's hitbox. Normal fruit and existing Visual
+  Mutation Specimens are untouched — this ring/glint pair is the only
+  Exceptional-specific tree visual.
 
 **360-cap behavior** (`TUNING.EXCEPTIONAL_TOTAL_CAP`): every generator
 clamps each Stat 0..100 and TOTAL <=360, degrading gracefully rather than
@@ -2098,15 +2101,62 @@ unchanged source as its valid fallback. No unbounded/regenerate-and-retry
 loops anywhere — redistribution is a single proportional-scale pass, with a
 small bounded corrective step only for rare integer-rounding overflow.
 
-**NOT YET IMPLEMENTED** (next planned pass — Exceptional discovery/reveal
-UX):
-- Polished Exceptional acquisition reveal (modal, "EXCEPTIONAL APPLE!")
-- Focus/TOTAL delta feedback (e.g. "SIZE +14", "TOTAL +6")
-- Trait/High/Elite badge UI
-- Source-Line comparison UX
-- Dedicated Exceptional SFX
-- Final sparkle/elaborate-pulse presentation beyond the current minimal ring
+**Exceptional discovery/reveal UX** (this pass — presentation only, no
+change to any genetics/occurrence/archetype/cap number above):
 
-Playable now: an Exceptional Specimen can appear on a tree Day 3+, survive
-reload unchanged, be harvested as a one-use Specimen, and work through the
-existing Breed system — see "Gameplay integration" above.
+- **Acquisition reveal** (`systems/exceptionalReveal.ts`
+  `formatExceptionalReveal`, consumed by `MainScene`'s existing
+  `'specimenAcquired'` handler): the instant a Genetic Exceptional
+  Specimen is harvested, one multi-line "EXCEPTIONAL APPLE!" message goes
+  through the same shared `ToastQueue` every other toast already uses — so
+  it's automatically serialized against (never overlapping) any other
+  transient toast in flight, with no new notification widget. Content is
+  archetype-specific: TRAIT_OUTLIER and ELITE_OUTLIER show the archetype
+  label, the focus Stat's delta (e.g. `SIZE +14`), and a `TOTAL` delta;
+  HIGH_POTENTIAL (no focus Stat) shows only the archetype label and
+  `TOTAL` delta. A closing `SAVED AS BREEDING SPECIMEN` line always
+  appears. Deltas are computed against the source Line's **current** five
+  Stats, looked up live via `Game.getVariety(specimen.sourceLineId)` — if
+  that Line can no longer be found, the reveal degrades safely to the
+  Specimen's own absolute Stat/TOTAL values instead of a delta, rather
+  than crashing or being suppressed (`formatExceptionalReveal`'s
+  `sourceStats: StatSet | undefined` parameter). `ToastQueue.show()`
+  (`ui/modals.ts`) was extended to size itself from a `\n`-joined
+  multi-line message (width from the longest line, height from line
+  count, center-aligned) and to accept an optional `holdMs` (default
+  1800ms, unchanged for every other existing call site) — the Exceptional
+  reveal alone uses a longer 3200ms hold so its several lines are
+  actually readable.
+- **SFX** (`systems/audio.ts` `playExceptionalFoundCue`): one short, bright
+  three-note ascending cue in a higher register than the existing three
+  cues, played once alongside the reveal toast — reuses the existing
+  single lazy `AudioContext`/`unlockAudio()` infrastructure, no new audio
+  system, not a general harvest sound (ordinary harvests stay silent).
+- **Specimen UI labeling** (`ui/SpecimenCard.ts`, `ui/SpecimenDetail.ts`):
+  both the compact grid card and the enlarged detail view show the
+  archetype label (`TRAIT OUTLIER` / `HIGH POTENTIAL` / `ELITE OUTLIER`,
+  via the shared `EXCEPTIONAL_ARCHETYPE_LABELS` map) for a Specimen that
+  has one; the detail view additionally shows `FOCUS: <STAT>` when a focus
+  Stat exists. An ordinary Visual Mutation Specimen (`exceptionalArchetype`
+  undefined) never renders any of this — both views already branch purely
+  on that field's presence. `ONE USE` and the existing full five-Stat
+  display are unchanged.
+- **DEV-only force path** (`Game.debugForceExceptional(fieldId?)`): forces
+  one currently-available active fruit slot on a planted Field ripe with a
+  freshly generated Exceptional Specimen, built through the exact same
+  `buildExceptionalSpecimen()` record shape the real Day-3+ roll uses
+  (factored out of `maybeGenerateExceptionalSpecimen` so both share one
+  construction path) — bypasses only `EXCEPTIONAL_START_DAY` and the 0.6%
+  occurrence roll, never the archetype/focus/Stat generation math itself,
+  so repeated calls still produce genuinely randomized archetypes. Not
+  wired to any UI/button; reachable only via the existing DEV-only
+  `window.__debugGame` console exposure (`MainScene.create()`'s
+  `import.meta.env.DEV` block) — exactly as production-inaccessible as
+  every other already-exposed Game internal there, never a player-facing
+  feature.
+
+Playable now: an Exceptional Specimen can appear on a tree Day 3+ with a
+noticeable ring/glint indicator, survive reload unchanged, be harvested
+into a clear serialized reveal (with SFX) that explains what was special
+and confirms it was saved, be identified later in the Specimens list, and
+work through the existing Breed system — see "Gameplay integration" above.

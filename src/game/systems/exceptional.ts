@@ -30,7 +30,23 @@ export type StatKey = (typeof STAT_KEYS)[number];
 /** A plain Stat record using the project's existing Variety/BreedingSpecimen field names (never a bespoke tuple type here — see StatKey above). */
 export type StatSet = Record<StatKey, number>;
 
+/** Display label per Stat, in STAT_KEYS order — reused by the reveal/UI labeling described above. */
+export const STAT_LABELS: Record<StatKey, string> = {
+  sweetness: 'SWEETNESS',
+  size: 'SIZE',
+  yieldStat: 'YIELD',
+  growth: 'GROWTH',
+  freshness: 'FRESHNESS',
+};
+
 export type ExceptionalArchetype = 'TRAIT_OUTLIER' | 'HIGH_POTENTIAL' | 'ELITE_OUTLIER';
+
+/** Human-readable archetype/Stat labels shared by every reveal/UI surface (SpecimenCard, SpecimenDetail, the acquisition toast) — plain data, no Phaser/UI dependency, so this stays reusable without pulling any presentation code into this pure genetics module. */
+export const EXCEPTIONAL_ARCHETYPE_LABELS: Record<ExceptionalArchetype, string> = {
+  TRAIT_OUTLIER: 'TRAIT OUTLIER',
+  HIGH_POTENTIAL: 'HIGH POTENTIAL',
+  ELITE_OUTLIER: 'ELITE OUTLIER',
+};
 
 /**
  * Pure result metadata for the later integration pass (see PROJECT.md

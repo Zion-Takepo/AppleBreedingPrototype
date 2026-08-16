@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import type { BreedingSpecimen } from '../types.ts';
 import { AppleVisual } from '../render/AppleVisual.ts';
 import { APPLE_RARITY, catalogLabel } from '../render/appleAssets.ts';
+import { EXCEPTIONAL_ARCHETYPE_LABELS, STAT_LABELS } from '../systems/exceptional.ts';
 import { RadarChart } from './RadarChart.ts';
 import { THEME } from './theme.ts';
 import { Button, text as mkText } from './uiKit.ts';
@@ -45,8 +46,21 @@ export function renderSpecimenDetail(
   container.add(mkText(scene, textX, y + 74, `Found Day ${specimen.foundDay}`, 22, THEME.textMid, false, true));
   container.add(mkText(scene, textX, y + 106, 'ONE USE — consumed when breeding starts', 18, '#b23b3b', true));
 
+  // Smallest useful Exceptional identification (see PROJECT.md "Exceptional
+  // discovery/reveal UX") — never shown for an ordinary Visual Mutation
+  // specimen, which has no exceptionalArchetype.
+  let metaY = y + 138;
+  if (specimen.exceptionalArchetype) {
+    container.add(mkText(scene, textX, metaY, EXCEPTIONAL_ARCHETYPE_LABELS[specimen.exceptionalArchetype], 20, '#b8860b', true));
+    metaY += 28;
+    if (specimen.exceptionalFocusStat) {
+      container.add(mkText(scene, textX, metaY, `FOCUS: ${STAT_LABELS[specimen.exceptionalFocusStat]}`, 18, THEME.textMid, false, true));
+      metaY += 26;
+    }
+  }
+
   if (opts.pairingWithLabel) {
-    container.add(mkText(scene, textX, y + 138, opts.pairingWithLabel, 20, '#3b6db2', true));
+    container.add(mkText(scene, textX, metaY, opts.pairingWithLabel, 20, '#3b6db2', true));
   }
 
   const radarY = y + appleSizePx + 130;

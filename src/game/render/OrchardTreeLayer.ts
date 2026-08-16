@@ -63,6 +63,31 @@ function rand(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
+// Tiny sparkle glints around a ripe Exceptional fruit's ring (see
+// FruitSlot.setExceptional) — small enough to never obscure the apple
+// itself, deliberately not a particle system (this codebase has none) —
+// just a few small twinkling shapes on independent alpha-pulse tweens.
+const GLINT_COUNT = 3;
+const GLINT_ANGLES_DEG = [-55, 60, 195];
+const GLINT_RADIUS_PX = 6;
+const GLINT_RING_OFFSET_PX = 14;
+
+/** Draws a tiny 4-point sparkle shape centered at (cx, cy) — used for the Exceptional ring's glints only. */
+function drawSparkle(g: Phaser.GameObjects.Graphics, cx: number, cy: number, r: number): void {
+  g.fillStyle(0xfff6d8, 1);
+  g.beginPath();
+  g.moveTo(cx, cy - r);
+  g.lineTo(cx + r * 0.35, cy - r * 0.35);
+  g.lineTo(cx + r, cy);
+  g.lineTo(cx + r * 0.35, cy + r * 0.35);
+  g.lineTo(cx, cy + r);
+  g.lineTo(cx - r * 0.35, cy + r * 0.35);
+  g.lineTo(cx - r, cy);
+  g.lineTo(cx - r * 0.35, cy - r * 0.35);
+  g.closePath();
+  g.fillPath();
+}
+
 /** Live hook a FruitSlot uses to ask the owner to actually harvest it. */
 export interface HarvestHooks {
   /**
@@ -90,6 +115,11 @@ class FruitSlot {
   // particles, no sound — a very gentle alpha pulse only.
   private exceptionalRing: Phaser.GameObjects.Graphics;
   private exceptionalPulseTween?: Phaser.Tweens.Tween;
+  // 2-4 tiny glints (see GLINT_COUNT above) that twinkle around the ring —
+  // same pivot child treatment as the ring itself, so reveal/hide/harvest-
+  // pop already handles them for free.
+  private exceptionalGlints: Phaser.GameObjects.Graphics[] = [];
+  private exceptionalGlintTweens: Phaser.Tweens.Tween[] = [];
   revealed = false;
   private revealing = false;
   private consumed = false;
@@ -108,6 +138,12 @@ class FruitSlot {
     this.exceptionalRing = scene.add.graphics();
     this.exceptionalRing.setVisible(false);
     this.pivot.add(this.exceptionalRing);
+    for (let i = 0; i < GLINT_COUNT; i++) {
+      const glint = scene.add.graphics();
+      glint.setVisible(false);
+      this.pivot.add(glint);
+      this.exceptionalGlints.push(glint);
+    }
     this.pivot.setScale(0);
     this.pivot.setAlpha(0);
 
@@ -125,7 +161,7 @@ class FruitSlot {
     this.apple.draw({ visualId, size });
   }
 
-  /** Toggles the minimal ripe-Exceptional ring (see class doc comment above). */
+  /** Toggles the minimal ripe-Exceptional ring + its few twinkling glints (see class doc comment above). */
   setExceptional(active: boolean): void {
     if (active) {
       this.exceptionalRing.clear();
@@ -143,11 +179,40 @@ class FruitSlot {
           ease: 'Sine.easeInOut',
         });
       }
+      if (this.exceptionalGlintTweens.length === 0) {
+        const ringRadius = FRUIT_PIVOT_RADIUS + GLINT_RING_OFFSET_PX;
+        this.exceptionalGlints.forEach((glint, i) => {
+          const angle = Phaser.Math.DegToRad(GLINT_ANGLES_DEG[i % GLINT_ANGLES_DEG.length]);
+          const gx = Math.cos(angle) * ringRadius;
+          const gy = FRUIT_PIVOT_RADIUS + Math.sin(angle) * ringRadius;
+          glint.clear();
+          drawSparkle(glint, gx, gy, GLINT_RADIUS_PX);
+          glint.setVisible(true);
+          glint.setAlpha(0);
+          this.exceptionalGlintTweens.push(
+            this.scene.tweens.add({
+              targets: glint,
+              alpha: { from: 0, to: 1 },
+              duration: 520 + i * 140,
+              delay: i * 260,
+              yoyo: true,
+              repeat: -1,
+              ease: 'Sine.easeInOut',
+            }),
+          );
+        });
+      }
     } else {
       this.exceptionalPulseTween?.stop();
       this.exceptionalPulseTween = undefined;
       this.exceptionalRing.setVisible(false);
       this.exceptionalRing.setAlpha(1);
+      this.exceptionalGlintTweens.forEach((t) => t.stop());
+      this.exceptionalGlintTweens = [];
+      this.exceptionalGlints.forEach((glint) => {
+        glint.setVisible(false);
+        glint.setAlpha(0);
+      });
     }
   }
 

@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import type { BreedingSpecimen } from '../types.ts';
 import { AppleVisual } from '../render/AppleVisual.ts';
 import { APPLE_RARITY, catalogLabel } from '../render/appleAssets.ts';
+import { EXCEPTIONAL_ARCHETYPE_LABELS } from '../systems/exceptional.ts';
 import { RadarChart } from './RadarChart.ts';
 import { THEME } from './theme.ts';
 import { panel, text as mkText } from './uiKit.ts';
@@ -55,6 +56,13 @@ export class SpecimenCard extends Phaser.GameObjects.Container {
     let ty = appleSizePx + 22;
     this.add(mkText(scene, w / 2, ty, `Found Day ${specimen.foundDay}`, rowSize, THEME.textDark, true).setOrigin(0.5, 0));
     ty += rowSize + 6;
+    // Smallest useful Exceptional identification (see PROJECT.md
+    // "Exceptional discovery/reveal UX") — never shown for an ordinary
+    // Visual Mutation specimen, which has no exceptionalArchetype.
+    if (specimen.exceptionalArchetype) {
+      this.add(mkText(scene, w / 2, ty, EXCEPTIONAL_ARCHETYPE_LABELS[specimen.exceptionalArchetype], 12, '#b8860b', true, true).setOrigin(0.5, 0));
+      ty += 15;
+    }
     this.add(mkText(scene, w / 2, ty, 'ONE USE', 14, '#b23b3b', true, true).setOrigin(0.5, 0));
     ty += 14 + (radarLabels ? 34 : 10);
 

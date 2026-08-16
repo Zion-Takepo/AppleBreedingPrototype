@@ -675,7 +675,21 @@ export class Game {
   private maybeGenerateExceptionalSpecimen(sourceVariety: Variety, policy: CultivationPolicy): BreedingSpecimen | null {
     if (this.state.day < TUNING.EXCEPTIONAL_START_DAY) return null;
     if (Math.random() >= TUNING.EXCEPTIONAL_OCCURRENCE_CHANCE) return null;
+    return this.buildExceptionalSpecimen(sourceVariety, policy);
+  }
 
+  /**
+   * Shared record-construction step behind both the real Day-3+ occurrence
+   * roll above and the DEV-only debugForceExceptional() helper below — the
+   * exact same valid BreedingSpecimen shape either way, so the debug path
+   * can never produce something the real gameplay path couldn't also
+   * produce. Assumes the occurrence decision has already been made by the
+   * caller (this function itself never rolls TUNING.EXCEPTIONAL_OCCURRENCE_CHANCE).
+   * Returns null for the genetics core's meaningless-result case (see
+   * systems/exceptional.ts) — treated as "no Exceptional Specimen," same as
+   * real play.
+   */
+  private buildExceptionalSpecimen(sourceVariety: Variety, policy: CultivationPolicy): BreedingSpecimen | null {
     const source: StatSet = {
       sweetness: sourceVariety.sweetness,
       size: sourceVariety.size,
@@ -701,6 +715,51 @@ export class Game {
       exceptionalArchetype: result.archetype,
       exceptionalFocusStat: result.focusStat,
     };
+  }
+
+  /**
+   * DEV-only browser-verification helper (see PROJECT.md "Exceptional
+   * discovery/reveal UX") — forces one currently-available active fruit
+   * slot on a planted Field (the given fieldId, or the first planted Field
+   * if omitted) ripe with a freshly generated Genetic Exceptional Specimen,
+   * built through the exact same buildExceptionalSpecimen() record shape
+   * every real Day-3+ occurrence uses — never a bespoke/fake data shape.
+   * Bypasses only EXCEPTIONAL_START_DAY and the 0.6% occurrence roll
+   * (neither of those constants is touched); the archetype/focus/Stat
+   * generation math itself is untouched and still genuinely randomized, so
+   * repeated calls exercise all three archetypes like real play would. Not
+   * wired to any UI/button — reachable only via the existing DEV-only
+   * `window.__debugGame` console exposure (see MainScene.create()'s
+   * `import.meta.env.DEV` block), so it's exactly as production-inaccessible
+   * as every other already-exposed Game internal, never a player-facing
+   * feature. Returns false (safe no-op) if there's no planted Field or no
+   * free active slot to use.
+   */
+  debugForceExceptional(fieldId?: number): boolean {
+    const field = fieldId != null ? this.getField(fieldId) : this.state.fields.find((f) => f.varietyId != null);
+    if (!field || !field.varietyId) return false;
+    const variety = this.getVariety(field.varietyId);
+    if (!variety) return false;
+    const slotIndex = field.slots.findIndex((s) => s.active && !s.specimen);
+    if (slotIndex < 0) return false;
+
+    // The genetics core's own meaningless-result guard (see
+    // buildExceptionalSpecimen) can, in principle, return null — retried a
+    // small bounded number of times rather than looping forever; a real
+    // Line's Stats are essentially never already sitting exactly at the
+    // 360 cap, so this practically always succeeds on the first try.
+    let specimen: BreedingSpecimen | null = null;
+    for (let attempt = 0; attempt < 5 && !specimen; attempt++) {
+      specimen = this.buildExceptionalSpecimen(variety, field.policy);
+    }
+    if (!specimen) return false;
+
+    const slot = field.slots[slotIndex];
+    slot.ripe = true;
+    slot.timer = 0;
+    slot.specimen = specimen;
+    this.notify();
+    return true;
   }
 
   /** Builds a breeding-parent view of a held Specimen — color/pattern are borrowed from its source Line (a Specimen doesn't persist its own; see types.ts's BreedingSpecimen doc comment), falling back to a neutral default only if that Line is somehow gone. `baseVisualId` is already correct on the specimen itself (set once at creation — see buildSpecimen), so it's simply passed through. */

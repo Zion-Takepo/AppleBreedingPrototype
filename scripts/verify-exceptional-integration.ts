@@ -36,6 +36,7 @@
 import { TUNING } from '../src/game/tuning.ts';
 import type { BreedingSpecimen, CultivationPolicy, Field, Variety } from '../src/game/types.ts';
 import { STAT_KEYS, generateExceptionalSpecimen, type StatSet } from '../src/game/systems/exceptional.ts';
+import { formatExceptionalReveal } from '../src/game/systems/exceptionalReveal.ts';
 import { Game } from '../src/game/Game.ts';
 import { STARTER_GREEN } from '../src/game/systems/starterLines.ts';
 
@@ -560,6 +561,106 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   assert('STAT_KEYS is still the canonical 5-key order shared with the genetics core (no divergent local copy in Game.ts)', STAT_KEYS.length === 5 && STAT_KEYS[0] === 'sweetness' && STAT_KEYS[4] === 'freshness');
   assert('existing Day-3+ Visual Mutation base rates are untouched by this pass (same TUNING constants, not redefined)', TUNING.SPECIMEN_COMMON_CHANCE === 0.003 && TUNING.SPECIMEN_RARE_CHANCE === 0.0005 && TUNING.SPECIMEN_EPIC_CHANCE === 0.00005);
   assert('the existing Visual/Common/Rare/Epic Specimen start-day rule (SPECIMEN_RANDOM_START_DAY) is untouched by the EXCEPTIONAL_START_DAY split', TUNING.SPECIMEN_RANDOM_START_DAY === 3);
+}
+
+// ===========================================================================
+// REVEAL FORMATTING (see PROJECT.md "Exceptional discovery/reveal UX" —
+// systems/exceptionalReveal.ts is pure string logic, so this is exercised
+// directly here rather than needing the Phaser-rendered ToastQueue).
+// ===========================================================================
+{
+  function fakeSpecimen(overrides: Partial<BreedingSpecimen> = {}): BreedingSpecimen {
+    return {
+      id: overrides.id ?? crypto.randomUUID(),
+      visualId: overrides.visualId ?? 'C1',
+      baseVisualId: overrides.baseVisualId ?? 'C1',
+      sweetness: overrides.sweetness ?? 50,
+      size: overrides.size ?? 50,
+      yieldStat: overrides.yieldStat ?? 50,
+      growth: overrides.growth ?? 50,
+      freshness: overrides.freshness ?? 50,
+      foundDay: overrides.foundDay ?? 3,
+      sourceLineId: overrides.sourceLineId ?? 'fake-line',
+      sourceGeneration: overrides.sourceGeneration ?? 1,
+      exceptionalArchetype: overrides.exceptionalArchetype,
+      exceptionalFocusStat: overrides.exceptionalFocusStat,
+    };
+  }
+
+  const sourceStats: StatSet = { sweetness: 50, size: 40, yieldStat: 50, growth: 50, freshness: 50 };
+
+  // TRAIT_OUTLIER: focus Stat clearly up (source total 240, only size changed).
+  const traitSpecimen = fakeSpecimen({ exceptionalArchetype: 'TRAIT_OUTLIER', exceptionalFocusStat: 'size', size: 54, sweetness: 50, yieldStat: 50, growth: 50, freshness: 50 });
+  const traitText = formatExceptionalReveal(traitSpecimen, sourceStats);
+  assert('TRAIT_OUTLIER reveal shows the archetype label', traitText.includes('TRAIT OUTLIER'));
+  assert('TRAIT_OUTLIER reveal derives the correct focus Stat delta (54-40 = +14)', traitText.includes('SIZE +14'));
+  assert('TRAIT_OUTLIER reveal derives the correct TOTAL delta (254-240 = +14)', traitText.includes('TOTAL +14'));
+  assert('TRAIT_OUTLIER reveal always includes the saved-as-specimen line', traitText.includes('SAVED AS BREEDING SPECIMEN'));
+
+  // HIGH_POTENTIAL: no focus Stat — only archetype + TOTAL delta, no Stat delta line at all.
+  const highSpecimen = fakeSpecimen({ exceptionalArchetype: 'HIGH_POTENTIAL', exceptionalFocusStat: null, sweetness: 55, size: 44, yieldStat: 55, growth: 55, freshness: 55 });
+  const highText = formatExceptionalReveal(highSpecimen, sourceStats);
+  assert('HIGH_POTENTIAL reveal shows the archetype label', highText.includes('HIGH POTENTIAL'));
+  assert('HIGH_POTENTIAL reveal derives the correct TOTAL delta (264-240 = +24)', highText.includes('TOTAL +24'));
+  assert('HIGH_POTENTIAL reveal never shows a per-Stat delta line (no focus Stat exists)', !/SWEETNESS|SIZE \+|YIELD|GROWTH|FRESHNESS \+/.test(highText.split('\n').slice(2, -2).join('\n')));
+
+  // ELITE_OUTLIER: focus Stat AND TOTAL both clearly up.
+  const eliteSpecimen = fakeSpecimen({ exceptionalArchetype: 'ELITE_OUTLIER', exceptionalFocusStat: 'sweetness', sweetness: 61, size: 45, yieldStat: 52, growth: 51, freshness: 51 });
+  const eliteText = formatExceptionalReveal(eliteSpecimen, sourceStats);
+  assert('ELITE_OUTLIER reveal shows the archetype label', eliteText.includes('ELITE OUTLIER'));
+  assert('ELITE_OUTLIER reveal derives the correct focus Stat delta (61-50 = +11)', eliteText.includes('SWEETNESS +11'));
+  assert('ELITE_OUTLIER reveal derives the correct TOTAL delta (260-240 = +20)', eliteText.includes('TOTAL +20'));
+
+  // Missing source Line: degrades safely to absolute values instead of a delta — never throws.
+  let degradedText = '';
+  let threw = false;
+  try {
+    degradedText = formatExceptionalReveal(traitSpecimen, undefined);
+  } catch {
+    threw = true;
+  }
+  assert('a missing source Line does not throw — degrades safely instead', !threw);
+  assert('degraded reveal shows the absolute focus Stat value (54), not a delta', degradedText.includes('SIZE 54'));
+  assert('degraded reveal shows the absolute TOTAL value (254), not a delta', degradedText.includes('TOTAL 254'));
+
+  // Ordinary (non-Exceptional) specimen never gets a reveal string at all — the
+  // "no Exceptional label on an ordinary specimen" guard for this formatter.
+  const ordinarySpecimen = fakeSpecimen({});
+  assert('an ordinary (non-Exceptional) specimen produces no reveal text', formatExceptionalReveal(ordinarySpecimen, sourceStats) === '');
+}
+
+// ===========================================================================
+// DEV FORCE PATH (Game.debugForceExceptional — see PROJECT.md "Exceptional
+// discovery/reveal UX"). Production-inaccessibility is structural, not
+// something a headless script can prove: the method is only ever reachable
+// via the DEV-only `window.__debugGame` console exposure wired in
+// MainScene.create()'s `import.meta.env.DEV` block, and is never wired to
+// any UI/button — see that file and PROJECT.md for the actual gate. What
+// IS checked here is that the method produces a real, valid, harvestable
+// Exceptional Specimen through the same record shape gameplay uses, and
+// safely no-ops when there's nothing valid to force.
+// ===========================================================================
+{
+  clearStorage();
+  const game = new Game();
+  const field = game.state.fields[0] as Field;
+
+  const forced = game.debugForceExceptional(field.id);
+  assert('debugForceExceptional succeeds against a planted Field with a free active slot', forced);
+  const slotIndex = field.slots.findIndex((s) => s.specimen?.exceptionalArchetype);
+  const slot = slotIndex >= 0 ? field.slots[slotIndex] : undefined;
+  assert('the forced slot is ripe with a valid Exceptional Specimen', !!slot && slot.ripe === true);
+  assert('the forced Specimen has a valid archetype', ['TRAIT_OUTLIER', 'HIGH_POTENTIAL', 'ELITE_OUTLIER'].includes(slot!.specimen!.exceptionalArchetype!));
+  assert('the forced Specimen carries the current day as foundDay', slot!.specimen!.foundDay === game.state.day);
+
+  const forcedId = slot!.specimen!.id;
+  const harvested = game.harvestFruitSlot(field.id, slotIndex);
+  assert('the forced Specimen harvests through the normal harvestFruitSlot path, same as a real one', harvested);
+  assert('it lands in the held Specimen inventory like any other Exceptional', game.state.specimens.some((s) => s.id === forcedId));
+
+  assert('debugForceExceptional safely no-ops (returns false) against a nonexistent Field id', game.debugForceExceptional(9999) === false);
+
+  assert("debugForceExceptional never touches TUNING's occurrence/day-gate constants", TUNING.EXCEPTIONAL_OCCURRENCE_CHANCE === 0.006 && TUNING.EXCEPTIONAL_START_DAY === 3);
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed.`);
