@@ -417,23 +417,221 @@ ORCHARD UI DIRECTION LOCKED:
 Do not mark final Orchard presentation complete — final art/audio passes
 remain.
 
-## Orchard Background V1
+## Orchard Layered Art V1
 
-**Implemented.** The approved external painterly Orchard background
-(`public/assets/orchard/orchard_background.png`) is now imported and
-displayed, used exactly as supplied — no tinting/blurring/derivative
-processing. Loaded once in `MainScene.preload()` under the shared
-`ORCHARD_BACKGROUND_KEY`/`ORCHARD_BACKGROUND_PATH` (exported from
-`ui/OrchardScreen.ts`) and drawn as the bottom-most layer inside
-`OrchardScreen`'s own Container, filling the full 1600x900 logical canvas,
-behind the five procedural trees/fruit and behind all Orchard UI — never
-interactive, so it cannot capture pointer input or block fruit
-click/sweep. Scoped to the ORCHARD screen only (it's part of
-`OrchardScreen`'s own Container, shown/hidden as a whole), so
-Breed/Calendar/Collection are unaffected. The five trees/apples remain a
-separate procedural layer on top of it — final tree/fruit art is still
-pending, and moving clouds/time-of-day atmosphere remain only a possible
-later enhancement, not part of this pass.
+**Implemented — SKY/CLOUDS/LANDSCAPE+TRUNKS/CANOPY all now integrated.**
+The approved external painterly layers are imported and displayed exactly
+as supplied (no tinting/blurring/derivative processing), loaded once in
+`MainScene.preload()` and drawn inside `OrchardScreen`'s own Container in
+this exact order (bottom to top): SKY → CLOUDS → LANDSCAPE+TRUNKS → 5x
+CANOPY (part of `OrchardTreeLayer`) → apples/effects → existing Orchard UI
+→ HUD/bottom nav. None of the art layers are ever interactive, so none can
+capture pointer input or block fruit click/sweep. Scoped to the ORCHARD
+screen only (all part of `OrchardScreen`'s own Container, shown/hidden as a
+whole), so Breed/Calendar/Collection are unaffected.
+
+- **SKY** (`orchard_sky_day_v1.png`, `ORCHARD_SKY_KEY`): static gradient,
+  full 1600x900, bottom-most layer. Time-of-day recoloring is still
+  pending — a later dedicated atmosphere pass.
+- **CLOUDS** (`orchard_cloud.png`, `ORCHARD_CLOUD_KEY`, `OrchardScreen`'s
+  `updateClouds()`): two instances of the same transparent artwork,
+  edge-to-edge, drifted left together and wrapped with modulo — since both
+  instances are identical, the wrap is invisible (no teleport/reset).
+  Horizontal drift only (no bob/scale/rotation/parallax), ~230s to fully
+  traverse one screen width. Advances every real frame alongside
+  `updateTrees()`, so it shares the same Breed-pause / no-duplicate-on-
+  screen-switch behavior the Living Orchard wind model already has.
+- **LANDSCAPE + baked trunks/roots/shadows** (`orchard_background.png`,
+  `ORCHARD_BACKGROUND_KEY`): now holds ONLY this layer (transparent sky
+  region) — sky/clouds were split into their own layers above. The
+  procedural trunk graphic in `OrchardTreeLayer` was removed; trunks are
+  now entirely part of this baked image.
+- **CANOPY** (`orchard_canopy.png`, `ORCHARD_CANOPY_KEY`, in
+  `render/OrchardTreeLayer.ts`): replaces the old procedural
+  three-circle placeholder — see "Canopy Layer V1" below for the
+  implementation details (now implemented, not spec-only).
+
+Foreground vegetation (layer 6) remains not yet planned/used. Do not mark
+final Orchard atmosphere complete — time-of-day lighting and foreground are
+still pending.
+
+## Canopy Layer V1
+
+**Implemented.** This section documents the canopy layer for the approved
+layered Orchard visual redesign. The design direction below was the target;
+the "Implementation notes" subsection at the end records the actual
+measured values used once the real baked-trunk art was integrated (they
+differ from this section's nominal estimates in some cases — the baked
+trunks vary slightly in height per tree, which the implementation accounts
+for with small per-tree position adjustments, never per-tree scale).
+
+**Orchard visual layering direction (approved, not all layers implemented
+yet)**: sky separate from the landscape (keeps time-of-day recoloring
+possible later); clouds separate from the sky (so they can drift
+independently); the landscape layer holds mountains/distant scenery,
+farmhouse/fence/meadow, the 5 tree trunks, root/base integration into the
+grass, and baked ground shadows; canopies are a separate layer from the
+trunks; apples stay separate interactive objects, never baked into any
+background layer. Trunks should read as physically planted into the field
+by the landscape layer, not pasted on top of it. All 5 trees stay the same
+visual scale; depth comes from position only. Horizontal openness and the
+no-side-panel-composition rule (see "Orchard UI Redesign (Structure Pass)"
+above) are unaffected. Sky/cloud/landscape source art
+(`orchard_sky_day_v1.png`, `orchard_cloud.png`, an updated
+`orchard_background.png`) already exists on disk awaiting a separate future
+integration pass — out of scope here; this section covers the canopy layer
+only.
+
+**A. Asset contents.** One transparent PNG per canopy. Included: leaf mass,
+plus thin outer twigs/fine branch detail if it reads well at this scale.
+Excluded: the trunk, roots, any baked ground shadow, apples, Exceptional
+ring/glint effects, and any UI — all of those live in other layers (trunk
+in the landscape layer per the direction above; apples/effects in their own
+layer; UI in `OrchardScreen`'s own cards).
+
+**B. Canopy dimensions.** ONE identical canopy artwork is reused for all 5
+trees at one fixed size — no per-tree scale/shape variants — which is what
+mechanically guarantees the equal-size rule (see G). A horizontal flip on
+some tree instances is the only permitted per-instance variation (cheap,
+no new art, breaks up obvious repetition without touching size/shape).
+Nominal bounding envelope at the 1600x900 baseline: **~280px wide x ~220px
+tall**, matching the current placeholder's own silhouette (three
+overlapping circles: r108 centered 120px above the tree's ground origin,
+plus two r72 circles ±68px either side, 80px above ground origin — see
+`OrchardTreeLayer.ts` `TreeNode`'s canopy `Graphics` calls) — reusing this
+envelope means the swap requires no change to `TREE_LAYOUT`, fruit anchors,
+or wind tuning.
+
+**C. Pivot / anchor.** Two distinct anchors — do not conflate them:
+- *Placement anchor (asset-space, new)*: the canopy PNG's own bottom-center
+  point registers at the tree-local point `(0, -60)` relative to the tree's
+  ground origin — the same y the trunk's own top edge already sits at
+  (`trunk.fillRect(-12, -60, 24, 80)`). The bulk of the canopy mass extends
+  upward/outward from there; the canopy's own lower silhouette should dip a
+  little below/around that line (see D), not stop flush at it.
+- *Rotation pivot (existing, frozen, unchanged)*: the tree's shared
+  `windPivot`, at the tree's ground/base origin `(0, 0)` — exactly as
+  today. The canopy image is simply parented under that same pivot, offset
+  upward by the placement anchor above, so ambient sway keeps rotating the
+  canopy (and, through it, the fruit) around this same base point exactly
+  as it does now. This pass does not move or redefine that pivot.
+
+**D. Trunk connection rule.** The canopy's own lower leaf mass should cover
+roughly the trunk's top ~15-20px (tree-local y from -60 down to about
+-40/-45), not just touch it at a single seam line — a soft, irregular leaf
+edge there, not a hard flat cut. That margin exists specifically to absorb
+sway: since rotation pivots at the ground origin (not at the canopy's own
+center), a few degrees of rotation swings the canopy's base slightly
+sideways relative to the stationary trunk, and a generous overlap is what
+keeps that from ever revealing a gap or the bare trunk-top edge at the sway
+extremes (±2.9° at rest, ~2-2.5x that during a gust — see F). The trunk
+itself is never part of the canopy asset; it lives entirely in the
+landscape layer per the direction above.
+
+**E. Apple anchor logic.** Unchanged 3-per-tree triangle — 1 upper, 2
+lower (left/right) — reusing the current relative positions exactly, now
+described as anchor zones on the canopy's own envelope so they stay
+consistent if the canopy's exact pixel size is later refined:
+- Upper: centered horizontally, ~73% of the way up into the canopy mass
+  (current: tree-local `(0, -168)`).
+- Lower-left / lower-right: ~±21% of the canopy's width from center, ~35%
+  of the way up (current: tree-local `(-60, -84)` / `(60, -84)`).
+- All three anchor zones must land on solid leaf silhouette in the new
+  artwork, never on transparent/negative space within the canopy's own
+  outline, so an apple never appears to float outside the foliage.
+- Apples remain separate Phaser objects (their own pivot/container),
+  parented under the same per-tree `windPivot` as the canopy so they
+  inherit its rotation for free, then layer their own smaller/slower
+  secondary sway on top exactly as today — never baked into the canopy
+  image itself.
+
+**F. Wind behavior.** Reuses the existing approved wind tuning exactly —
+frozen, not retuned by this spec: canopy sway up to `CANOPY_SWAY_MAX_DEG`
+(2.9° at rest, ~2-2.5x during a gust) plus a small horizontal drift, each
+tree's own small amplitude (±10%) and response-speed variation rolled once
+at construction (see `OrchardTreeLayer.ts`'s tuning block). Once the
+canopy image replaces the current procedural circles, it must rotate/drift
+as one rigid unit around the same base pivot the placeholder uses today —
+no new sway parameters, no independent per-leaf motion. The trunk does not
+visibly bend (it's outside `windPivot`, in the stationary landscape layer).
+Apples inherit canopy rotation via the shared `windPivot` and then apply
+their own existing secondary lag-sway on top, unchanged.
+
+**G. Equal-size rule.** Guaranteed by B: one canopy artwork, one fixed
+display size, no per-tree scale multiplier — the same mechanism
+`TREE_LAYOUT`'s shared `scale: 1.0` already uses for the procedural
+placeholder. The two back-row trees differ only in `groundY` (positioned
+higher, e.g. today's `280` vs `356`), never in `scale`. This spec adds no
+per-row exception and explicitly rules one out.
+
+**H. Final Orchard layer order** (bottom to top) — all implemented except 6:
+1. Sky — implemented (`orchard_sky_day_v1.png`, static; time-of-day
+   recoloring still pending)
+2. Clouds — implemented, drifts independently of the sky
+   (`orchard_cloud.png`, `OrchardScreen.updateClouds()`)
+3. Landscape + trunks + roots + baked shadows — implemented
+   (`orchard_background.png`, now holds only this layer)
+4. Canopies — implemented (`orchard_canopy.png`, one shared image per
+   tree, in `OrchardTreeLayer.ts`'s `TreeNode`; replaced the old
+   procedural `Graphics` circle-cluster placeholder)
+5. Apples / effects (implemented — `AppleVisual`, `FruitSlot`, the
+   Exceptional ring/glints)
+6. Foreground grass (not yet planned/used)
+7. Orchard UI (implemented — Field/Stats/Action cards, `OrchardScreen.ts`)
+8. HUD / bottom nav (implemented — `HUD.ts`, `BottomNav.ts`)
+
+**Implementation notes (actual measured values, this integration pass).**
+The baked trunks in `orchard_background.png` sit lower in the frame than
+the old placeholder and vary slightly in height per tree, so several of
+this spec's nominal values were adjusted — always by POSITION only, never
+by per-tree scale (rules B/G above are unchanged and still hold):
+- `TREE_LAYOUT.x`/`groundY` now match each tree's own baked trunk's ground
+  contact point exactly (measured from the source art), not the old
+  placeholder-tuned values — e.g. front-row `groundY` moved from `356` to
+  `~588-594`, back-row from `280` to `~456-459`. `x` stayed close to the
+  original placeholder values (the baked trunks landed near the same
+  horizontal spots).
+- Canopy display size is `300x225` (exact 4:3, matching the source art's
+  own aspect ratio) rather than the nominal `280x220` — sized up slightly
+  to fully cover the widest baked branch spread while preserving the
+  source's aspect ratio exactly (no distortion).
+- The canopy source PNG has transparent padding above/below its own leaf
+  silhouette (not a flush bottom edge), so placement uses the silhouette's
+  own measured bottom-center (`CANOPY_ANCHOR_FRAC`), not the raw image
+  edge — using the raw edge would have hung each canopy well above its
+  trunk.
+- Each tree's `canopyOffsetY` (where that anchor registers, tree-local) is
+  set per-tree from that tree's own trunk height (`-85` to `-168` across
+  the 5 trees) rather than one shared constant — necessary because the
+  baked trunks aren't all the same height. The 3 apple anchor zones (E) are
+  now derived per-tree from this same value via
+  `canopyFruitOffsets()`, using the section E fractions (73%/35%/±21%)
+  against the canopy's own measured content height, so they stay on solid
+  leaf silhouette on every tree despite the height differences.
+- 2 of the 5 trees use `flip: true` (horizontal flip only, per B) to break
+  up the obvious repetition of reusing one artwork 5 times.
+
+**I. Future asset-generation requirements** — a canopy PNG must satisfy
+all of the following to drop in cleanly later:
+- Transparent PNG (alpha channel); leaf mass + optional fine twig/branch
+  detail only — nothing from the excluded list in A.
+- One artwork reused for all 5 trees at one fixed size; horizontal flip is
+  the only allowed per-instance variation (see B).
+- Authored at a nominal ~280x220px envelope at the 1600x900 baseline (see
+  B), generated at higher resolution (2-3x, matching how the apple
+  illustrations are already sourced) for crisp downscaling, not upscaled
+  from a smaller source.
+- Internal bottom-center anchor at the trunk-top connection zone, with the
+  lower ~15-20px of leaf silhouette overlapping/dipping around that point
+  (see C/D) — no hard flat bottom edge.
+- The three apple anchor zones (see E) fall on solid leaf silhouette, not
+  gaps, within the artwork's own outline.
+- Painterly style, light direction, and palette consistent with the
+  approved landscape/background art so the swap doesn't read as a
+  mismatched sticker.
+- Legible at the smallest supported CrazyGames scale-down — the whole
+  canvas scales uniformly via `Phaser.Scale.FIT` (no separate low-res
+  variant needed), so this is a visual-clarity check, not a second asset.
 
 ## Shipping Pipeline
 

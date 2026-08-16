@@ -3,7 +3,16 @@ import { Game } from '../Game.ts';
 import { LAYOUT, THEME } from '../ui/theme.ts';
 import { HUD } from '../ui/HUD.ts';
 import { BottomNav, type ScreenId } from '../ui/BottomNav.ts';
-import { ORCHARD_BACKGROUND_KEY, ORCHARD_BACKGROUND_PATH, OrchardScreen } from '../ui/OrchardScreen.ts';
+import {
+  ORCHARD_BACKGROUND_KEY,
+  ORCHARD_BACKGROUND_PATH,
+  ORCHARD_CLOUD_KEY,
+  ORCHARD_CLOUD_PATH,
+  ORCHARD_SKY_KEY,
+  ORCHARD_SKY_PATH,
+  OrchardScreen,
+} from '../ui/OrchardScreen.ts';
+import { ORCHARD_CANOPY_KEY, ORCHARD_CANOPY_PATH } from '../render/OrchardTreeLayer.ts';
 import { BreedScreen } from '../ui/BreedScreen.ts';
 import { CalendarScreen } from '../ui/CalendarScreen.ts';
 import { CollectionScreen } from '../ui/CollectionScreen.ts';
@@ -81,10 +90,13 @@ export class MainScene extends Phaser.Scene {
     for (const id of APPLE_ASSET_IDS) {
       this.load.image(appleTextureKey(id), appleAssetPath(id));
     }
-    // Orchard Background V1 (see PROJECT.md "Orchard Background V1") — the
-    // approved external painterly background, loaded once under a stable
-    // key and used exactly as supplied by OrchardScreen.
+    // Orchard layered art (see PROJECT.md orchard visual-integration pass)
+    // — the approved external painterly layers, loaded once under stable
+    // keys and used exactly as supplied by OrchardScreen/OrchardTreeLayer.
     this.load.image(ORCHARD_BACKGROUND_KEY, ORCHARD_BACKGROUND_PATH);
+    this.load.image(ORCHARD_SKY_KEY, ORCHARD_SKY_PATH);
+    this.load.image(ORCHARD_CLOUD_KEY, ORCHARD_CLOUD_PATH);
+    this.load.image(ORCHARD_CANOPY_KEY, ORCHARD_CANOPY_PATH);
   }
 
   create(): void {
@@ -97,6 +109,9 @@ export class MainScene extends Phaser.Scene {
       this.textures.get(appleTextureKey(id)).setFilter(Phaser.Textures.FilterMode.LINEAR);
     }
     this.textures.get(ORCHARD_BACKGROUND_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_SKY_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_CLOUD_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_CANOPY_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
 
     const bg = this.add.graphics();
     bg.fillStyle(THEME.bgSky, 1);

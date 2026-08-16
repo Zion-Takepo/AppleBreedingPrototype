@@ -15,6 +15,26 @@ interface TreeLayoutSlot {
   x: number;
   groundY: number;
   scale: number;
+  /**
+   * Tree-local y (relative to the ground/windPivot origin) where the
+   * canopy artwork's own leaf-mass bottom-center registers — see
+   * CANOPY_ANCHOR_FRAC below. Varies per tree because the baked trunks in
+   * orchard_background.png are hand-painted at slightly different heights;
+   * this is a POSITION-only adjustment (see PROJECT.md "Canopy Layer V1"
+   * section D / the orchard visual-integration pass) — canopy display
+   * size/scale stays identical for all 5 (CANOPY_DISPLAY_W/H below).
+   */
+  canopyOffsetY: number;
+  /** Horizontal flip only — no scale/shape variation (see PROJECT.md "Canopy Layer V1" section B). */
+  flip?: boolean;
+  /**
+   * Which depth row this tree belongs to — selects which of the two
+   * row-specific canopy vertical nudges (CANOPY_VERTICAL_NUDGE_FRONT_PX /
+   * _BACK_PX below) applies on top of this tree's own canopyOffsetY. Purely
+   * a canopy-Y lookup key; depth itself still comes entirely from groundY
+   * placement/layer order (back row added first), never from this field.
+   */
+  row: 'front' | 'back';
 }
 
 // 2 back-row trees (positioned higher, peeking between the front row) + 3
@@ -29,25 +49,155 @@ interface TreeLayoutSlot {
 // "FIVE TREES — ALL EQUAL VISUAL SIZE"): all five use the identical `scale`
 // — depth is suggested by ground placement/layer overlap only, never by
 // shrinking the rear two. Do not reintroduce a smaller back-row scale.
+//
+// x/groundY were measured directly from the baked trunk positions in
+// orchard_background.png (converted from that PNG's own pixel space into
+// this 1600x900 logical space) so each tree's rotation pivot sits exactly
+// on its own baked trunk's ground contact point — see the orchard
+// visual-integration pass report for the measurement method. This is why
+// groundY differs substantially from the old placeholder-art values: the
+// baked trees sit lower/more naturally in the field, per the approved
+// composition direction.
+// RETUNE (human visual feedback: the far-left/far-right front trunks read
+// as too close to the screen edges). TREE 1/TREE 3's own `x` nudged 50px
+// inward each (223->273, 1383->1333) — a position-only polish pass, not a
+// re-measurement of the baked trunk art; `groundY`/`canopyOffsetY` (still
+// tied to each tree's own baked trunk) and TREE 2 (front-middle, already
+// central) are untouched.
+// RETUNE 2 (human visual feedback: the two back-row trees sit almost
+// exactly in the horizontal midpoint of their neighboring front-row gap,
+// which is what reads as a continuous "leaf wall" toward the front-middle
+// tree — no visible background between the 3 trees clustered in the
+// center). Back row only, pulled 25px each AWAY from center-front (TREE 4
+// 542->517 toward TREE 1's side, TREE 5 1066->1091 toward TREE 3's side),
+// opening a clearer background gap on the front-middle side of each back
+// tree. Front row `x` left as-is — already fixed in the prior pass and not
+// called out as still edge-hugging this time. `canopyOffsetY` below also
+// gets a small per-tree bump this pass (see the canopy-nudge constants
+// below) on top of these unchanged `x`/`groundY` values.
+// RETUNE 3 (human visual feedback: background still too buried behind the
+// trees; composition still feels crowded toward center). Outer 4 trees
+// (everyone except TREE 2, kept as the fixed center anchor) nudged another
+// 18px further outward each, opening more background at the sides:
+// TREE 4 517->499, TREE 5 1091->1109, TREE 1 273->255, TREE 3 1333->1351.
+// `groundY`/`scale` untouched, so the existing depth relationship (back row
+// higher/added-first, front row lower/added-after) is unaffected.
+// RETUNE 6 (human visual feedback: overall X composition now approved —
+// only the two outermost FRONT trees needed a small further outward nudge
+// to fix a slight remaining misalignment). TREE 1 255->243 (-12, further
+// left), TREE 3 1351->1363 (+12, further right). TREE 2 (front-middle) and
+// both back-row trees (TREE 4/TREE 5) `x` are untouched — this is
+// deliberately NOT a global front-row spread.
 const TREE_LAYOUT: TreeLayoutSlot[] = [
-  { x: 500, groundY: 280, scale: 1.0 },
-  { x: 1100, groundY: 280, scale: 1.0 },
-  { x: 240, groundY: 356, scale: 1.0 },
-  { x: 800, groundY: 356, scale: 1.0 },
-  { x: 1360, groundY: 356, scale: 1.0 },
+  { x: 499, groundY: 459, scale: 1.0, canopyOffsetY: -84, row: 'back' }, // TREE 4 (back-left)
+  { x: 1109, groundY: 456, scale: 1.0, canopyOffsetY: -83, flip: true, row: 'back' }, // TREE 5 (back-right)
+  { x: 243, groundY: 594, scale: 1.0, canopyOffsetY: -164, row: 'front' }, // TREE 1 (front-left)
+  { x: 808, groundY: 588, scale: 1.0, canopyOffsetY: -157, flip: true, row: 'front' }, // TREE 2 (front-middle)
+  { x: 1363, groundY: 593, scale: 1.0, canopyOffsetY: -106, row: 'front' }, // TREE 3 (front-right)
 ];
 // 5 trees x 3 slots = 15, matching TUNING.FRUIT_PER_BATCH — decoupled by
 // design (this file is presentation-only), but the two must agree.
 const FRUIT_PER_TREE = 3;
 
-// Triangle of fruit slots, relative to a tree's local origin (ground/trunk
-// base). Spaced further apart than the original version so each apple
-// reads as distinct fruit, while staying inside the canopy silhouette.
-const FRUIT_SLOT_OFFSETS: [number, number][] = [
-  [0, -168],
-  [-60, -84],
-  [60, -84],
-];
+// ------------------------------------------------------------------
+// Canopy artwork (see PROJECT.md "Canopy Layer V1" — now implemented, not
+// spec-only). One shared image, one fixed display size for all 5 trees
+// (HARD REQUIREMENT — see TreeNode below). Source is a 4:3 painterly PNG
+// with transparent padding above/below the actual leaf silhouette, so
+// placement uses the silhouette's own measured bounds rather than the raw
+// image edges — see CANOPY_ANCHOR_FRAC/CANOPY_TOP_FRAC.
+// ------------------------------------------------------------------
+export const ORCHARD_CANOPY_KEY = 'orchard-canopy';
+export const ORCHARD_CANOPY_PATH = 'assets/orchard/orchard_canopy.png';
+const CANOPY_SOURCE_W = 1448;
+const CANOPY_SOURCE_H = 1086;
+// RETUNE (human visual feedback: canopy read as too small / thin relative
+// to the baked trunks). Bumped from the prior 300x225 up to 380x285,
+// preserving the source's exact 4:3 aspect ratio (no distortion) — same
+// mechanism as before, just a larger shared envelope.
+// RETUNE 2 (human visual feedback: 380x285 read a little too large/heavy
+// overall). Small pull-back to 350x263 — same aspect ratio, same
+// mechanism, not a rescale of the earlier pass's intent.
+// RETUNE 3 (human visual feedback: still slightly too dominant / too much
+// continuous canopy coverage). Another small pull-back, 350x263 -> 330x248
+// (~5.7% smaller), same aspect ratio, same shared-size mechanism.
+const CANOPY_DISPLAY_W = 330;
+const CANOPY_DISPLAY_H = Math.round((CANOPY_DISPLAY_W * CANOPY_SOURCE_H) / CANOPY_SOURCE_W); // 248
+// Measured on the source art: the leaf mass's own bottom-center / top
+// extent as a fraction of image height (NOT 1.0/0.0 — there's transparent
+// padding on both edges). Used as the Image's origin.y so Phaser's own
+// origin math places the anchor exactly, no manual offset arithmetic.
+const CANOPY_ANCHOR_FRAC = 977 / 1086;
+const CANOPY_TOP_FRAC = 39 / 1086;
+const CANOPY_CONTENT_H = CANOPY_DISPLAY_H * (CANOPY_ANCHOR_FRAC - CANOPY_TOP_FRAC);
+// RETUNE (human visual feedback: foliage sat too high above the baked
+// trunks, reading as a separate "hat" rather than one connected tree). One
+// shared downward nudge applied on top of every tree's own per-trunk
+// `canopyOffsetY` (TREE_LAYOUT keeps its per-tree alignment values
+// unchanged) — see TreeNode's constructor for where it's applied to both
+// the canopy image and the derived fruit anchors.
+// RETUNE 2 (human visual feedback: still slightly top-heavy / trunk-canopy
+// seam still a little visible). Nudged a little further, 35 -> 50.
+// RETUNE 3 (human visual feedback: still a bit top-heavy, and some
+// trunk/canopy joins still don't feel fully natural per-tree). Two parts
+// this pass, both small: (1) this shared nudge bumped once more, 50 -> 58;
+// (2) each tree's own `canopyOffsetY` above ALSO got a small individual
+// bump this pass (+2 back row, +3/+4 front row — front trunks are taller,
+// so their canopy had further to travel to close the seam) instead of
+// relying on this shared constant alone, per the "no single global nudge
+// only" feedback. The two combine per-tree (see TreeNode's `canopyY`
+// below) into a ~10-12px net downward move per tree versus the prior pass.
+// RETUNE 4 (human visual feedback: background still too buried behind the
+// canopies, especially the mountains/sky behind the back row — the orchard
+// needed to read as sitting a bit lower in the landscape). The single
+// shared nudge above is now split into two row-specific constants — front
+// row and back row are no longer forced to the same vertical treatment.
+// Back row gets the bigger push (58 -> 72, +14) since those two trees sit
+// highest in frame, closest to the mountain backdrop, so lowering their
+// canopy opens the most background; front row gets a smaller bump (58 ->
+// 62, +4) to keep the already-tuned front trunk/canopy joins from the
+// prior pass mostly intact while still contributing to the overall
+// "sits a bit lower" feel. Depth itself is untouched — still driven purely
+// by groundY/layer order (see TREE_LAYOUT), never by this Y nudge.
+// RETUNE 5 (human visual feedback: X-axis composition now approved,
+// Y-axis only — back row should feel a little more naturally BEHIND the
+// front row, and the front row should feel closer/fuller). Row-specific
+// split kept exactly as RETUNE 4 established (no reversion to one shared
+// constant), just the two values re-tuned in opposite directions: back row
+// nudged UP a little (72 -> 64, -8), front row nudged DOWN more (62 -> 78,
+// +16 — about double the back row's move, per the "front noticeably lower"
+// direction). Still purely a canopy-Y lookup; depth stays driven by
+// groundY/layer order alone.
+// RETUNE 6 (human visual feedback: depth split still needed to be a
+// little stronger — back row should reveal a bit more background behind
+// it, front row should read more clearly in front). Row split kept as-is;
+// back row nudged UP a little further (64 -> 56, -8), front row nudged
+// DOWN more (78 -> 92, +14 — still noticeably more than the back row's
+// move, per the "front should move more" direction).
+// RETUNE 7 (human visual feedback: X-axis composition approved — front-row
+// canopies only needed one more small downward nudge). Front row only,
+// 92 -> 100 (+8). Back row constant untouched (56) — the row split already
+// gives front-only control, no back-row change needed for consistency.
+const CANOPY_VERTICAL_NUDGE_FRONT_PX = 100;
+const CANOPY_VERTICAL_NUDGE_BACK_PX = 56;
+
+/**
+ * Apple anchor zones as fractions of the canopy's own measured content
+ * height/width (see PROJECT.md "Canopy Layer V1" section E: upper ~73% up,
+ * lower-left/right ~±21% width / ~35% up) — computed per-tree from that
+ * tree's own canopyOffsetY so all three anchors land on solid leaf
+ * silhouette regardless of that tree's particular baked trunk height.
+ */
+function canopyFruitOffsets(canopyOffsetY: number): [number, number][] {
+  const upperY = canopyOffsetY - 0.73 * CANOPY_CONTENT_H;
+  const lowerY = canopyOffsetY - 0.35 * CANOPY_CONTENT_H;
+  const lowerX = 0.21 * CANOPY_DISPLAY_W;
+  return [
+    [0, upperY],
+    [-lowerX, lowerY],
+    [lowerX, lowerY],
+  ];
+}
 
 const ORCHARD_APPLE_BASE_PX = 80;
 const FRUIT_PIVOT_RADIUS = ORCHARD_APPLE_BASE_PX / 2;
@@ -80,8 +230,14 @@ const REVEAL_SETTLE_MS = 300;
 // own small amplitude variation and eased in at its own small response
 // speed (both rolled ONCE per tree, never rerolled) — the shared direction
 // dominates, per-tree differences stay subtle.
-const CANOPY_SWAY_MAX_DEG = 2.9; // ~1.8x the original 1.6deg — normal breeze should read as clearly alive
-const CANOPY_DRIFT_MAX_PX = 5; // small horizontal lean alongside the rotation, same direction, same shared signal
+// RETUNE (human visual feedback: overall sway read a little too strong).
+// CANOPY_SWAY_MAX_DEG, CANOPY_DRIFT_MAX_PX, and FRUIT_SWAY_MAX_DEG below
+// all scaled by the same 0.75 factor (2.9->2.175, 5->3.75, 4.2->3.15) —
+// a uniform ~25% amplitude cut that keeps the canopy/fruit/drift ratios
+// (and therefore the "canopy, plus a bit more" relationship) identical to
+// before, not a redesign of the response-speed/timing constants below.
+const CANOPY_SWAY_MAX_DEG = 2.175; // was 2.9 (~1.8x the original 1.6deg) — now ~25% smaller
+const CANOPY_DRIFT_MAX_PX = 3.75; // was 5 — small horizontal lean alongside the rotation, same direction, same shared signal
 const TREE_AMP_SCALE_MIN = 0.9; // ±10% — was ±18%; kept small so the shared wind stays the obvious primary driver
 const TREE_AMP_SCALE_MAX = 1.1;
 const TREE_RESPONSE_RATE_MIN = 5; // higher = snappier; ~0.05-0.20s settle lag between trees (was ~0.5-0.8s — too slow, read as separate cycles)
@@ -92,7 +248,7 @@ const TREE_RESPONSE_RATE_MAX = 20;
 // THIS tree's own current canopy angle (so it stays "the canopy, plus a
 // bit more") and eased in more slowly than the canopy itself so it visibly
 // lags — a filter-lag effect, not a literal delay timer.
-const FRUIT_SWAY_MAX_DEG = 4.2; // ~1.9x the original 2.2deg
+const FRUIT_SWAY_MAX_DEG = 3.15; // was 4.2 (~1.9x the original 2.2deg) — now ~25% smaller, same scale factor as CANOPY_SWAY_MAX_DEG above
 const FRUIT_RESPONSE_RATE_MIN = 4; // slower than canopy's own 5-20 -> ~0.10-0.25s perceived lag behind it
 const FRUIT_RESPONSE_RATE_MAX = 10;
 const FRUIT_AMP_SCALE_MIN = 0.8; // unchanged — small per-fruit variation, never the dominant signal
@@ -367,13 +523,14 @@ class FruitSlot {
 }
 
 /**
- * One tree: a stationary root (world position/scale + trunk — "rooted in
- * the ground") holding a `windPivot` that carries the canopy graphics and
- * every FruitSlot. Rotating `windPivot` sways canopy + fruit together as one
- * rigid gust push; each FruitSlot then layers its own smaller secondary
- * sway (see FruitSlot.updateSway) on top via its own local `angle`, so the
- * two rotations compose (parent windPivot angle + child pivot angle)
- * without either overwriting the other.
+ * One tree: a stationary root (world position/scale, aligned to the baked
+ * trunk in orchard_background.png — "rooted in the ground") holding a
+ * `windPivot` that carries the canopy image and every FruitSlot. Rotating
+ * `windPivot` sways canopy + fruit together as one rigid gust push; each
+ * FruitSlot then layers its own smaller secondary sway (see
+ * FruitSlot.updateSway) on top via its own local `angle`, so the two
+ * rotations compose (parent windPivot angle + child pivot angle) without
+ * either overwriting the other.
  */
 class TreeNode {
   readonly container: Phaser.GameObjects.Container;
@@ -391,12 +548,11 @@ class TreeNode {
     this.container = scene.add.container(layout.x, layout.groundY);
     this.container.setScale(layout.scale);
 
-    // Trunk: stays directly on the stationary root container — nearly
-    // motionless regardless of wind, so the tree still reads as rooted.
-    const trunk = scene.add.graphics();
-    trunk.fillStyle(0x6b4a2b, 1);
-    trunk.fillRect(-12, -60, 24, 80);
-    this.container.add(trunk);
+    // Trunk/roots/ground-shadow are now baked into orchard_background.png
+    // (the landscape layer, drawn beneath this whole tree layer) — no
+    // procedural trunk graphic here anymore. The stationary root container
+    // above still exists purely to hold windPivot at the correct
+    // world position; it draws nothing of its own.
 
     // Canopy + fruit: both live under windPivot so ambient sway rotates
     // them together, while gameplay reveal/pop tweens (scale/alpha only,
@@ -404,14 +560,23 @@ class TreeNode {
     this.windPivot = scene.add.container(0, 0);
     this.container.add(this.windPivot);
 
-    const canopy = scene.add.graphics();
-    canopy.fillStyle(0x3f7a30, 1);
-    canopy.fillCircle(0, -120, 108);
-    canopy.fillCircle(-68, -80, 72);
-    canopy.fillCircle(68, -80, 72);
+    // Canopy image: one shared texture/display size for all 5 trees (HARD
+    // REQUIREMENT — see PROJECT.md "Canopy Layer V1" section G). origin.y =
+    // CANOPY_ANCHOR_FRAC places the leaf mass's own measured bottom-center
+    // exactly at this tree's canopyOffsetY, plus this tree's OWN ROW's
+    // downward nudge (CANOPY_VERTICAL_NUDGE_FRONT_PX / _BACK_PX — no longer
+    // one shared constant, see the RETUNE 4 comment above) — never captures
+    // pointer input.
+    const rowNudge = layout.row === 'back' ? CANOPY_VERTICAL_NUDGE_BACK_PX : CANOPY_VERTICAL_NUDGE_FRONT_PX;
+    const canopyY = layout.canopyOffsetY + rowNudge;
+    const canopy = scene.add.image(0, canopyY, ORCHARD_CANOPY_KEY);
+    canopy.setOrigin(0.5, CANOPY_ANCHOR_FRAC);
+    canopy.setDisplaySize(CANOPY_DISPLAY_W, CANOPY_DISPLAY_H);
+    if (layout.flip) canopy.setFlipX(true);
     this.windPivot.add(canopy);
 
-    this.slots = FRUIT_SLOT_OFFSETS.map(([ox, oy], waveIdx) => {
+    const fruitOffsets = canopyFruitOffsets(canopyY);
+    this.slots = fruitOffsets.map(([ox, oy], waveIdx) => {
       const slot = new FruitSlot(scene, ox, oy, hooks, treeIndex * FRUIT_PER_TREE + waveIdx);
       this.windPivot.add(slot.pivot);
       return slot;

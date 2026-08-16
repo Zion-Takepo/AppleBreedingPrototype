@@ -21,14 +21,34 @@ import { openShippingInfraModal } from './ShippingInfraModal.ts';
 // is presentation-only.
 // ------------------------------------------------------------------
 
-// Orchard Background V1 (see PROJECT.md "Orchard Background V1") — the
-// single approved external painterly background, used exactly as supplied
-// (no tinting/blurring/derivative processing). Exported so MainScene can
-// load it under the same key/path this screen displays it with — the same
-// pattern APPLE_ASSET_IDS/appleTextureKey/appleAssetPath already use for
-// the apple illustrations.
+// Orchard layered art V1 (see PROJECT.md "Canopy Layer V1" / the orchard
+// visual-integration pass) — approved external painterly layers, each used
+// exactly as supplied (no tinting/blurring/derivative processing). Exported
+// so MainScene can load them under stable keys, the same pattern
+// APPLE_ASSET_IDS/appleTextureKey/appleAssetPath already use for the apple
+// illustrations.
+//
+// orchard_background.png now holds ONLY the landscape + 5 baked trunks/
+// roots/ground-shadows (transparent sky region) — sky and clouds are their
+// own separate layers below, per the approved layering direction.
 export const ORCHARD_BACKGROUND_KEY = 'orchard-background';
 export const ORCHARD_BACKGROUND_PATH = 'assets/orchard/orchard_background.png';
+export const ORCHARD_SKY_KEY = 'orchard-sky';
+export const ORCHARD_SKY_PATH = 'assets/orchard/orchard_sky_day_v1.png';
+export const ORCHARD_CLOUD_KEY = 'orchard-cloud';
+export const ORCHARD_CLOUD_PATH = 'assets/orchard/orchard_cloud.png';
+
+// Cloud drift (see PROJECT.md orchard visual-integration pass) — very slow,
+// constant horizontal drift only (no vertical bob/scale/rotation/parallax).
+// Two instances of the same cloud texture, placed edge-to-edge and both
+// shifted left together, wrapped with modulo — since both instances are the
+// identical artwork, the wrap point is invisible (no hard reset/teleport).
+// ~230s to fully traverse one screen width is deliberately subtle ("notice
+// after spending some time," not obvious scrolling).
+const CLOUD_DISPLAY_W = LAYOUT.width;
+const CLOUD_DISPLAY_H = LAYOUT.height;
+const CLOUD_TRAVERSAL_SECONDS = 230;
+const CLOUD_DRIFT_PX_PER_SEC = CLOUD_DISPLAY_W / CLOUD_TRAVERSAL_SECONDS;
 
 // Field card (top-left) — a small secondary label plus a compact
 // deep-forest pill (current Line + dropdown) and a separate cream/gold
@@ -102,6 +122,10 @@ function drawStatIcon(g: Phaser.GameObjects.Graphics, key: StatKey, cx: number, 
 export class OrchardScreen extends Phaser.GameObjects.Container {
   private game: Game;
   private toasts: ToastQueue;
+  private sky: Phaser.GameObjects.Image;
+  private cloudA: Phaser.GameObjects.Image;
+  private cloudB: Phaser.GameObjects.Image;
+  private cloudOffsetPx = 0;
   private background: Phaser.GameObjects.Image;
   private treeLayer: OrchardTreeLayer;
   private fieldCard: Phaser.GameObjects.Container;
@@ -151,6 +175,25 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     // global scene background, so it only ever appears on the ORCHARD
     // screen — Breed/Calendar/Collection keep their own current look
     // untouched.
+    // SKY — bottom-most layer, full 1600x900, non-interactive, static for
+    // this pass (no time-of-day recoloring yet — a later dedicated
+    // atmosphere pass). Same offset/setDisplaySize approach as the
+    // landscape background below.
+    this.sky = scene.add.image(0, -LAYOUT.contentTop, ORCHARD_SKY_KEY).setOrigin(0, 0);
+    this.sky.setDisplaySize(LAYOUT.width, LAYOUT.height);
+
+    // CLOUDS — two instances of the same transparent cloud artwork,
+    // edge-to-edge, drifted together (see CLOUD_DRIFT_PX_PER_SEC above).
+    // Never interactive.
+    this.cloudA = scene.add.image(0, -LAYOUT.contentTop, ORCHARD_CLOUD_KEY).setOrigin(0, 0);
+    this.cloudA.setDisplaySize(CLOUD_DISPLAY_W, CLOUD_DISPLAY_H);
+    this.cloudB = scene.add.image(CLOUD_DISPLAY_W, -LAYOUT.contentTop, ORCHARD_CLOUD_KEY).setOrigin(0, 0);
+    this.cloudB.setDisplaySize(CLOUD_DISPLAY_W, CLOUD_DISPLAY_H);
+
+    // LANDSCAPE + baked trunks/roots/shadows — the approved external
+    // painterly layer (see PROJECT.md), used exactly as supplied. Never
+    // interactive, so it cannot capture pointer input or block fruit
+    // click/sweep.
     this.background = scene.add.image(0, -LAYOUT.contentTop, ORCHARD_BACKGROUND_KEY).setOrigin(0, 0);
     this.background.setDisplaySize(LAYOUT.width, LAYOUT.height);
 
@@ -158,11 +201,27 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.fieldCard = scene.add.container(0, 0);
     this.mainView = scene.add.container(0, 0);
     this.fieldDropdown = scene.add.container(0, 0);
-    // Draw order: background, then trees, then the field card, then the
-    // stats/action card content, then the field dropdown popup topmost (so
-    // it never renders underneath the card it opens from).
-    this.add([this.background, this.treeLayer, this.fieldCard, this.mainView, this.fieldDropdown]);
+    // Draw order: sky, clouds, landscape+trunks, then trees/canopies/fruit,
+    // then the field card, then the stats/action card content, then the
+    // field dropdown popup topmost (so it never renders underneath the card
+    // it opens from).
+    this.add([this.sky, this.cloudA, this.cloudB, this.background, this.treeLayer, this.fieldCard, this.mainView, this.fieldDropdown]);
     scene.add.existing(this);
+  }
+
+  /**
+   * Advances cloud drift by dtSeconds — called every real frame alongside
+   * updateTrees() below (same persistent-timer pattern the Living Orchard
+   * wind model already uses: only ticks while Orchard presentation is
+   * relevant/not Breed-paused, never resets on screen switch, never
+   * duplicates instances). Purely horizontal offset, wrapped with modulo so
+   * the two identical cloud instances hand off seamlessly with no visible
+   * jump.
+   */
+  private updateClouds(dtSeconds: number): void {
+    this.cloudOffsetPx = (this.cloudOffsetPx + CLOUD_DRIFT_PX_PER_SEC * dtSeconds) % CLOUD_DISPLAY_W;
+    this.cloudA.x = -this.cloudOffsetPx;
+    this.cloudB.x = CLOUD_DISPLAY_W - this.cloudOffsetPx;
   }
 
   /** Verification-only: not used by any gameplay path. */
@@ -180,8 +239,9 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.treeLayer.debugTriggerWindGust();
   }
 
-  /** Called every real frame from MainScene.update() so fruit-reveal/sway animations progress smoothly. */
+  /** Called every real frame from MainScene.update() so fruit-reveal/sway/cloud-drift animations progress smoothly. */
   updateTrees(dtSeconds: number): void {
+    this.updateClouds(dtSeconds);
     const field = this.game.getField(this.selectedFieldId);
     if (!field || !field.varietyId) return;
     const variety = this.game.getVariety(field.varietyId);
