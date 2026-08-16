@@ -68,6 +68,11 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.treeLayer.harvestAllRemaining();
   }
 
+  /** DEV-only: forces the next Living Orchard wind gust to start immediately (see OrchardTreeLayer.debugTriggerWindGust). Reachable via window.__debugOrchard in dev builds; never called from production/gameplay code. */
+  debugTriggerWindGust(): void {
+    this.treeLayer.debugTriggerWindGust();
+  }
+
   /** Called every real frame from MainScene.update() so fruit-reveal/sway animations progress smoothly. */
   updateTrees(dtSeconds: number): void {
     const field = this.game.getField(this.selectedFieldId);

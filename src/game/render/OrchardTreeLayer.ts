@@ -3,6 +3,7 @@ import type { Game } from '../Game.ts';
 import type { Field, Variety } from '../types.ts';
 import { effectiveStats } from '../systems/economy.ts';
 import { AppleVisual } from './AppleVisual.ts';
+import { WindModel } from './orchardWind.ts';
 
 // ------------------------------------------------------------------
 // Tuning — Orchard presentation only. None of this affects harvest
@@ -45,15 +46,48 @@ const FRUIT_PIVOT_RADIUS = ORCHARD_APPLE_BASE_PX / 2;
 const REVEAL_POP_MS = 200;
 const REVEAL_SETTLE_MS = 300;
 
-const GUST_MIN_S = 3;
-const GUST_MAX_S = 6;
-const GUST_ANGLE_MIN_DEG = 8;
-const GUST_ANGLE_MAX_DEG = 12;
-const GUST_DURATION_MIN_MS = 1200;
-const GUST_DURATION_MAX_MS = 1800;
+// ------------------------------------------------------------------
+// Living Orchard Motion Prototype — ambient wind sway tuning. See
+// render/orchardWind.ts for the shared wind signal itself (base breeze +
+// occasional gust); everything below only maps that ONE shared value to
+// degrees of rotation (and a little horizontal drift) for a given
+// tree/fruit. CURRENT PLACEHOLDER ART ONLY (see PROJECT.md "Living Orchard
+// Motion Prototype").
+//
+// RETUNE (human feedback: motion too subtle, five trees read as
+// independent pendulums rather than one shared breeze): every tree now
+// reacts to the exact same instantaneous `wind.value` — there is no more
+// per-tree time-shifted sampling of the signal (the old ±2.2s phase offset
+// was large enough, relative to the ~7-11s base breeze period, to visibly
+// desync trees). The ONLY per-tree individuality left is a small amplitude
+// scale and a small response-speed (easing) difference, both rolled once
+// at construction — enough that the five trees don't move in frame-perfect
+// lockstep, not enough to look like separate oscillators. To retune "how
+// strong/fast the breeze feels," change the four constants in this block;
+// there is no other place sway magnitude is computed.
+// ------------------------------------------------------------------
 
-const TREE_SWAY_MAX_DEG = 0.8;
-const TREE_SWAY_HALF_CYCLE_MS = 3400;
+// Canopy (foliage): every tree targets the SAME wind.value, scaled by its
+// own small amplitude variation and eased in at its own small response
+// speed (both rolled ONCE per tree, never rerolled) — the shared direction
+// dominates, per-tree differences stay subtle.
+const CANOPY_SWAY_MAX_DEG = 2.9; // ~1.8x the original 1.6deg — normal breeze should read as clearly alive
+const CANOPY_DRIFT_MAX_PX = 5; // small horizontal lean alongside the rotation, same direction, same shared signal
+const TREE_AMP_SCALE_MIN = 0.9; // ±10% — was ±18%; kept small so the shared wind stays the obvious primary driver
+const TREE_AMP_SCALE_MAX = 1.1;
+const TREE_RESPONSE_RATE_MIN = 5; // higher = snappier; ~0.05-0.20s settle lag between trees (was ~0.5-0.8s — too slow, read as separate cycles)
+const TREE_RESPONSE_RATE_MAX = 20;
+
+// Fruit: inherits the canopy's rotation for free (it's a child of the same
+// windPivot) plus its own small secondary pendulum sway, proportional to
+// THIS tree's own current canopy angle (so it stays "the canopy, plus a
+// bit more") and eased in more slowly than the canopy itself so it visibly
+// lags — a filter-lag effect, not a literal delay timer.
+const FRUIT_SWAY_MAX_DEG = 4.2; // ~1.9x the original 2.2deg
+const FRUIT_RESPONSE_RATE_MIN = 4; // slower than canopy's own 5-20 -> ~0.10-0.25s perceived lag behind it
+const FRUIT_RESPONSE_RATE_MAX = 10;
+const FRUIT_AMP_SCALE_MIN = 0.8; // unchanged — small per-fruit variation, never the dominant signal
+const FRUIT_AMP_SCALE_MAX = 1.25;
 
 // Direct-harvest tuning.
 const HIT_RADIUS = FRUIT_PIVOT_RADIUS + 16; // slightly larger than the apple itself
@@ -123,7 +157,12 @@ class FruitSlot {
   revealed = false;
   private revealing = false;
   private consumed = false;
-  private gustTimerS = rand(GUST_MIN_S, GUST_MAX_S);
+  // Secondary wind sway (see class doc comment + tuning block above) — own
+  // amplitude/response speed rolled ONCE per fruit slot so 15 apples on the
+  // same tree don't all wobble identically either.
+  private swayAngle = 0;
+  private readonly swayAmpScale = rand(FRUIT_AMP_SCALE_MIN, FRUIT_AMP_SCALE_MAX);
+  private readonly swayResponseRate = rand(FRUIT_RESPONSE_RATE_MIN, FRUIT_RESPONSE_RATE_MAX);
 
   constructor(scene: Phaser.Scene, offsetX: number, offsetY: number, hooks: HarvestHooks, index: number) {
     this.scene = scene;
@@ -251,8 +290,9 @@ class FruitSlot {
 
     this.consumed = true;
     this.revealed = false;
-    this.scene.tweens.killTweensOf(this.pivot);
-    this.pivot.setAngle(0);
+    // Only scale/alpha are tweened here — angle is driven every frame by
+    // updateSway() (ambient wind), so the two compose instead of fighting;
+    // no killTweensOf/angle reset needed since no tween ever targets angle.
     this.scene.tweens.add({
       targets: this.pivot,
       scale: 0,
@@ -296,72 +336,94 @@ class FruitSlot {
     });
   }
 
-  tickGust(scene: Phaser.Scene, dtSeconds: number): void {
-    if (!this.revealed) return;
-    this.gustTimerS -= dtSeconds;
-    if (this.gustTimerS > 0) return;
-    this.gustTimerS = rand(GUST_MIN_S, GUST_MAX_S);
-
-    const gustAngle = rand(GUST_ANGLE_MIN_DEG, GUST_ANGLE_MAX_DEG) * (Math.random() < 0.5 ? -1 : 1);
-    const settleDuration = rand(GUST_DURATION_MIN_MS, GUST_DURATION_MAX_MS);
-    // Quick push from the gust, then a damped pendulum-like swing back to rest.
-    scene.tweens.add({
-      targets: this.pivot,
-      angle: gustAngle,
-      duration: 120,
-      ease: 'Sine.easeOut',
-      onComplete: () => {
-        scene.tweens.add({
-          targets: this.pivot,
-          angle: 0,
-          duration: settleDuration,
-          ease: 'Elastic.easeOut',
-          easeParams: [1, 0.35],
-        });
-      },
-    });
+  /**
+   * Ambient secondary sway, driven every frame from this fruit's own tree's
+   * CURRENT canopy angle (not the raw wind directly) — "inherits canopy
+   * movement, plus a bit more" — rather than a one-off tween. Composes
+   * cleanly with the scale/alpha tweens above since this is the only thing
+   * that ever touches `angle`. Runs regardless of reveal/harvest state
+   * (harmless while invisible) so a fruit never "catches up" or snaps when
+   * it reappears.
+   * @param canopyAngleDeg this fruit's own tree's current windPivot angle
+   *   (already includes that tree's own amplitude/response variation); the
+   *   fruit's own slower response rate is what makes it visibly lag behind
+   *   the canopy rather than track it 1:1.
+   */
+  updateSway(canopyAngleDeg: number, dtSeconds: number): void {
+    const target = (canopyAngleDeg / CANOPY_SWAY_MAX_DEG) * FRUIT_SWAY_MAX_DEG * this.swayAmpScale;
+    const alpha = 1 - Math.exp(-this.swayResponseRate * dtSeconds);
+    this.swayAngle += (target - this.swayAngle) * alpha;
+    this.pivot.setAngle(this.swayAngle);
   }
 }
 
-/** One tree: trunk + canopy (static) plus 3 FruitSlots. */
+/**
+ * One tree: a stationary root (world position/scale + trunk — "rooted in
+ * the ground") holding a `windPivot` that carries the canopy graphics and
+ * every FruitSlot. Rotating `windPivot` sways canopy + fruit together as one
+ * rigid gust push; each FruitSlot then layers its own smaller secondary
+ * sway (see FruitSlot.updateSway) on top via its own local `angle`, so the
+ * two rotations compose (parent windPivot angle + child pivot angle)
+ * without either overwriting the other.
+ */
 class TreeNode {
   readonly container: Phaser.GameObjects.Container;
+  private readonly windPivot: Phaser.GameObjects.Container;
   readonly slots: FruitSlot[];
+  private canopyAngle = 0;
+  // Rolled ONCE at construction — see the tuning block near the top of this
+  // file. No per-tree phase/time-shift anymore: every tree targets the
+  // exact same wind.value, differing only in how strongly (ampScale) and
+  // how quickly (responseRate) it eases toward that shared target.
+  private readonly ampScale = rand(TREE_AMP_SCALE_MIN, TREE_AMP_SCALE_MAX);
+  private readonly responseRate = rand(TREE_RESPONSE_RATE_MIN, TREE_RESPONSE_RATE_MAX);
 
-  constructor(scene: Phaser.Scene, layout: TreeLayoutSlot, swayDelayMs: number, hooks: HarvestHooks, treeIndex: number) {
+  constructor(scene: Phaser.Scene, layout: TreeLayoutSlot, hooks: HarvestHooks, treeIndex: number) {
     this.container = scene.add.container(layout.x, layout.groundY);
     this.container.setScale(layout.scale);
 
-    const g = scene.add.graphics();
-    g.fillStyle(0x6b4a2b, 1);
-    g.fillRect(-12, -60, 24, 80);
-    g.fillStyle(0x3f7a30, 1);
-    g.fillCircle(0, -120, 108);
-    g.fillCircle(-68, -80, 72);
-    g.fillCircle(68, -80, 72);
-    this.container.add(g);
+    // Trunk: stays directly on the stationary root container — nearly
+    // motionless regardless of wind, so the tree still reads as rooted.
+    const trunk = scene.add.graphics();
+    trunk.fillStyle(0x6b4a2b, 1);
+    trunk.fillRect(-12, -60, 24, 80);
+    this.container.add(trunk);
+
+    // Canopy + fruit: both live under windPivot so ambient sway rotates
+    // them together, while gameplay reveal/pop tweens (scale/alpha only,
+    // see FruitSlot) are untouched by it.
+    this.windPivot = scene.add.container(0, 0);
+    this.container.add(this.windPivot);
+
+    const canopy = scene.add.graphics();
+    canopy.fillStyle(0x3f7a30, 1);
+    canopy.fillCircle(0, -120, 108);
+    canopy.fillCircle(-68, -80, 72);
+    canopy.fillCircle(68, -80, 72);
+    this.windPivot.add(canopy);
 
     this.slots = FRUIT_SLOT_OFFSETS.map(([ox, oy], waveIdx) => {
       const slot = new FruitSlot(scene, ox, oy, hooks, treeIndex * FRUIT_PER_TREE + waveIdx);
-      this.container.add(slot.pivot);
+      this.windPivot.add(slot.pivot);
       return slot;
-    });
-
-    // Optional, very subtle continuous sway, phase-shifted per tree.
-    scene.time.delayedCall(swayDelayMs, () => {
-      scene.tweens.add({
-        targets: this.container,
-        angle: TREE_SWAY_MAX_DEG,
-        duration: TREE_SWAY_HALF_CYCLE_MS,
-        ease: 'Sine.easeInOut',
-        yoyo: true,
-        repeat: -1,
-      });
     });
   }
 
-  tickGustAll(scene: Phaser.Scene, dtSeconds: number): void {
-    this.slots.forEach((slot) => slot.tickGust(scene, dtSeconds));
+  /**
+   * Advances this tree's own canopy sway — eased toward the SAME shared
+   * `wind.value` every tree targets, at this tree's own small
+   * amplitude/response variation — plus a small horizontal drift in the
+   * same direction (both derived from the one shared signal, so they never
+   * disagree), and every one of its fruit's secondary sway. Called once
+   * per real frame from OrchardTreeLayer.sync().
+   */
+  updateSway(wind: WindModel, dtSeconds: number): void {
+    const target = wind.value * CANOPY_SWAY_MAX_DEG * this.ampScale;
+    const alpha = 1 - Math.exp(-this.responseRate * dtSeconds);
+    this.canopyAngle += (target - this.canopyAngle) * alpha;
+    this.windPivot.setAngle(this.canopyAngle);
+    this.windPivot.x = (this.canopyAngle / CANOPY_SWAY_MAX_DEG) * CANOPY_DRIFT_MAX_PX;
+    this.slots.forEach((slot) => slot.updateSway(this.canopyAngle, dtSeconds));
   }
 }
 
@@ -393,6 +455,9 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
   // input, not any one fruit) so a press that starts on empty grass and
   // then drags onto fruit still harvests them.
   private sweepActive = false;
+  // Single shared ambient wind for the whole Orchard (see render/orchardWind.ts)
+  // — one instance, advanced once per sync() call, sampled by every tree/fruit.
+  private wind = new WindModel();
 
   constructor(scene: Phaser.Scene, game: Game) {
     super(scene, 0, 0);
@@ -413,7 +478,7 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     };
 
     this.trees = TREE_LAYOUT.map((layout, i) => {
-      const tree = new TreeNode(scene, layout, i * 620, hooks, i);
+      const tree = new TreeNode(scene, layout, hooks, i);
       this.add(tree.container);
       return tree;
     });
@@ -498,7 +563,18 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
       });
     }
 
-    this.trees.forEach((tree) => tree.tickGustAll(this.scene, dtSeconds));
+    // Ambient wind — advanced once here (never per-tree) so every tree/fruit
+    // samples the exact same underlying signal; only ticks while sync() is
+    // being called, i.e. while Orchard is relevant and the farm isn't
+    // paused for Breed (see MainScene.update()), matching every other
+    // Orchard-presentation timer in this file.
+    this.wind.update(dtSeconds);
+    this.trees.forEach((tree) => tree.updateSway(this.wind, dtSeconds));
     this.lastIdentityKey = identityKey;
+  }
+
+  /** DEV-only: skips straight to the next wind gust instead of waiting out its scheduled interval, so a browser check doesn't need to wait 10-25s. Never called from production/gameplay code. */
+  debugTriggerWindGust(): void {
+    this.wind.debugTriggerGust();
   }
 }

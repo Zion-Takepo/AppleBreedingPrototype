@@ -310,6 +310,69 @@ for what still needs human browser verification.
   simply applies to whichever fruit is harvested next; there is no batch
   boundary left to defer it across.
 
+## Living Orchard Motion Prototype
+
+**Implemented — CURRENT PLACEHOLDER ART ONLY.** A first pass at making the
+Orchard feel alive while idle (no clicking), built entirely on the existing
+five procedural trees/fruit — no new art, no redesign, no audio yet. Answers
+one question only: is this motion foundation worth building the final
+Orchard art on top of? See `src/game/render/orchardWind.ts` (the wind model)
+and `src/game/render/OrchardTreeLayer.ts` (how trees/fruit consume it).
+
+- **Shared breeze**: one `WindModel` instance per `OrchardTreeLayer`, a pure
+  function of elapsed time — a normalized-ish value from two slow,
+  incommensurate sine waves (avoids a repetitive single-oscillator look)
+  plus an occasional gust envelope (smooth rise → brief peak → smooth fall,
+  next gust's start time chosen once — a random 10–25s out — then simply
+  waited out, never rerolled per frame). Advances once per `sync()` call, so
+  it only ticks while the farm simulation isn't paused for Breed, matching
+  every other Orchard-presentation timer in this file.
+- **Shared wind dominates** (retuned after human feedback that five trees
+  read as independent pendulums rather than one breeze): every tree targets
+  the exact same instantaneous `wind.value` — there is no more per-tree
+  time-shifted sampling of the signal. The only per-tree individuality left
+  is a small amplitude scale (±10%) and a small response/easing-speed
+  difference (settle lag roughly 0.05–0.20s between trees), both rolled
+  ONCE at construction, never rerolled — enough that the five trees don't
+  move in frame-perfect lockstep, not enough to look like separate
+  oscillators. Normal canopy rotation amplitude and fruit secondary-sway
+  amplitude were also both increased (canopy ~1.8x, fruit ~1.9x their
+  original values) so the idle breeze reads as clearly alive without
+  deliberately watching for it; a small horizontal drift (same shared
+  signal, same direction as the tilt) was added alongside the rotation.
+  Gust strength was also raised so a gust now peaks at roughly 2–2.5x the
+  base breeze's own amplitude. All sway-magnitude constants live in one
+  tuning block at the top of `OrchardTreeLayer.ts`.
+- **Foliage vs. trunk**: each tree's root container (world position/scale +
+  trunk graphic) is stationary; canopy graphics and all 3 fruit slots sit
+  under a child `windPivot` that actually rotates (plus the small shared-
+  signal horizontal drift above). The trunk stays rooted regardless of wind
+  strength — untouched by this retune.
+- **Fruit secondary sway**: each `FruitSlot`'s own local `angle` (previously
+  unused — reveal/harvest tweens only ever touched scale/alpha) is driven
+  every frame proportionally to its OWN tree's current canopy angle (not
+  the raw wind directly) — "inherits canopy movement, plus a bit more" —
+  eased in more slowly than the canopy itself so it visibly lags rather
+  than tracking it 1:1, with its own small amplitude/response variation
+  rolled once at construction. Interactive hitboxes are unaffected by
+  rotation (unchanged `Circle` hit area on the same pivot), so the visible
+  apple and its click target never diverge.
+- **Composability**: ambient sway only ever sets `angle`; every existing
+  gameplay tween (reveal pop-in, harvest pop-out, the Exceptional ring/glint
+  pulses) only ever sets `scale`/`alpha`. The two systems can't fight over
+  the same field.
+- Verification: `scripts/verify-orchard-wind.ts` covers the wind model's own
+  math in isolation (continuous variation, gust scheduling window/duration,
+  envelope shape, delayed sampling) — it does not exercise Phaser rendering,
+  transforms, or hitbox alignment, which need human browser verification.
+
+**Not yet implemented** (future Living Orchard passes, in rough order):
+1. Final layered painterly Orchard art (this pass is placeholder art only).
+2. Environmental ambience — wind audio, birds, time-of-day sound.
+3. Orchard UI redesign (background, HUD, Packing box, nav).
+4. Reactive harvest/shipping polish.
+5. Time-of-day visual atmosphere.
+
 ## Shipping Pipeline
 
 Harvesting (individual click/sweep or HARVEST ALL — both feed the identical
