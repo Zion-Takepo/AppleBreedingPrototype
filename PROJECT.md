@@ -2002,3 +2002,48 @@ Harvest → Discovery → Breed → Line ownership (see Orchard Mutation /
 Breeding Specimen / Breed connection above), fixing the structural
 disconnect playtesting surfaced between harvesting and breeding. The full
 visual redesign follows once that connective loop exists, not before.
+
+## Exceptional Specimen genetics core
+
+**Genetics core implemented but NOT YET connected to gameplay.** A small,
+isolated foundation pass — `src/game/systems/exceptional.ts` — answering
+only "given a source Line's five Stats, can we generate interesting, valid
+Exceptional genetic outliers with deterministic/testable rules?" No Phaser
+imports, no GameState mutation, no save logic; verified standalone by
+`scripts/verify-exceptional-genetics.ts`.
+
+Three archetypes, rolled by `TUNING.EXCEPTIONAL_ARCHETYPE_WEIGHTS` (cumulative
+thresholds, see `selectArchetype`): **TRAIT_OUTLIER** 60% (one focus Stat
++10..+16, TOTAL -1..+3 — a specialist, not a universal upgrade),
+**HIGH_POTENTIAL** 35% (no focus Stat, TOTAL +4..+7 spread proportionally
+across all five Stats), **ELITE_OUTLIER** 5% (focus Stat +8..+14 AND TOTAL
++6..+9 — the rare jackpot). `TUNING.EXCEPTIONAL_OCCURRENCE_CHANCE` (0.006,
+0.6%) is defined and unit-tested for the later integration pass but is not
+rolled anywhere in current gameplay.
+
+Cultivation biases WHICH Stat becomes the focus for TRAIT_OUTLIER/
+ELITE_OUTLIER only (`TUNING.EXCEPTIONAL_FOCUS_BIAS`, `selectFocusStat`) —
+NORMAL is an even 20% each; SWEETEN is Sweetness 60% / others 10% each;
+GROW_BIG is Size 60% / others 10% each. HIGH_POTENTIAL has no focus Stat, so
+Cultivation doesn't affect it. Cultivation never changes the 0.6%
+occurrence chance itself — a fully separate roll.
+
+**360-cap behavior** (`TUNING.EXCEPTIONAL_TOTAL_CAP`): every generator
+clamps each Stat 0..100 and TOTAL <=360, degrading gracefully rather than
+failing — a focus increase that would exceed 100 applies only the feasible
+remainder; at TOTAL 360, TRAIT_OUTLIER/ELITE_OUTLIER still raise the focus
+Stat by compensating elsewhere (others get scaled down to make room), and
+HIGH_POTENTIAL (which cannot increase TOTAL at all once capped) returns the
+unchanged source as its valid fallback. No unbounded/regenerate-and-retry
+loops anywhere — redistribution is a single proportional-scale pass, with a
+small bounded corrective step only for rare integer-rounding overflow.
+
+**NOT YET IMPLEMENTED** (next planned pass — Exceptional Orchard → Specimen
+integration):
+- Orchard rolling (nothing currently reads `EXCEPTIONAL_OCCURRENCE_CHANCE`)
+- FruitSlot persistence
+- Specimen acquisition / inventory
+- Breed integration
+- Orchard visual/reveal UX (sparkle/ring effects, audio)
+
+Not playable yet — this pass is genetics math only.

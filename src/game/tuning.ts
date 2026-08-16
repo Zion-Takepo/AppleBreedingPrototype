@@ -257,6 +257,43 @@ export const TUNING = {
   // two-warning (17:30 + 17:50) table to a single 17:00 warning — human
   // playtesting found two warnings unnecessary.
   CLOSING_WARNING_CLOCK: { hour: 17, minute: 0 },
+
+  // Exceptional Specimen genetics — PURE GENETIC CORE ONLY (see PROJECT.md
+  // "Exceptional Specimen genetics core" and systems/exceptional.ts). NOT
+  // YET connected to gameplay: nothing currently rolls
+  // EXCEPTIONAL_OCCURRENCE_CHANCE — it's defined/tested here only so the
+  // later Orchard->Specimen integration pass has an agreed-upon constant to
+  // read rather than inventing one then.
+  EXCEPTIONAL_OCCURRENCE_CHANCE: 0.006, // 0.6%, unused by current gameplay
+  // Cumulative-threshold weights consumed in this exact order by
+  // systems/exceptional.ts's selectArchetype — must sum to 1.
+  EXCEPTIONAL_ARCHETYPE_WEIGHTS: { TRAIT_OUTLIER: 0.6, HIGH_POTENTIAL: 0.35, ELITE_OUTLIER: 0.05 },
+  // TRAIT_OUTLIER: one Stat strongly elevated, TOTAL roughly unchanged.
+  EXCEPTIONAL_TRAIT_FOCUS_INCREASE_MIN: 10,
+  EXCEPTIONAL_TRAIT_FOCUS_INCREASE_MAX: 16,
+  EXCEPTIONAL_TRAIT_TOTAL_DELTA_MIN: -1,
+  EXCEPTIONAL_TRAIT_TOTAL_DELTA_MAX: 3,
+  // HIGH_POTENTIAL: no focus Stat, broadly stronger TOTAL.
+  EXCEPTIONAL_HIGH_POTENTIAL_TOTAL_DELTA_MIN: 4,
+  EXCEPTIONAL_HIGH_POTENTIAL_TOTAL_DELTA_MAX: 7,
+  // ELITE_OUTLIER: one Stat strongly elevated AND TOTAL meaningfully up.
+  EXCEPTIONAL_ELITE_FOCUS_INCREASE_MIN: 8,
+  EXCEPTIONAL_ELITE_FOCUS_INCREASE_MAX: 14,
+  EXCEPTIONAL_ELITE_TOTAL_DELTA_MIN: 6,
+  EXCEPTIONAL_ELITE_TOTAL_DELTA_MAX: 9,
+  // Same absolute genetic budget ceiling breeding/Specimens already use
+  // (BREED's GENETIC_BUDGET_CAP / SPECIMEN_BUDGET_CAP above).
+  EXCEPTIONAL_TOTAL_CAP: 360,
+  // Cultivation focus-selection bias for TRAIT_OUTLIER/ELITE_OUTLIER only
+  // (HIGH_POTENTIAL has no focus Stat) — each policy's five weights must sum
+  // to 1. Does NOT change EXCEPTIONAL_OCCURRENCE_CHANCE or the archetype
+  // weights above; it only biases WHICH Stat becomes the focus once an
+  // Exceptional roll (elsewhere, later pass) has already happened.
+  EXCEPTIONAL_FOCUS_BIAS: {
+    NORMAL: { sweetness: 0.2, size: 0.2, yieldStat: 0.2, growth: 0.2, freshness: 0.2 },
+    SWEETEN: { sweetness: 0.6, size: 0.1, yieldStat: 0.1, growth: 0.1, freshness: 0.1 },
+    GROW_BIG: { sweetness: 0.1, size: 0.6, yieldStat: 0.1, growth: 0.1, freshness: 0.1 },
+  },
 } as const;
 
 export const COLORS = ['Red', 'Green', 'Yellow', 'Purple'] as const;
