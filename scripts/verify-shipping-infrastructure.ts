@@ -131,8 +131,8 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
 // TUNING TABLES
 // ===========================================================================
 {
-  assert('Packing Capacity levels are exactly 12/18/24/32/40', JSON.stringify(TUNING.PACKING_CAPACITY_LEVELS) === JSON.stringify([12, 18, 24, 32, 40]));
-  assert('Packing Capacity upgrade costs are exactly 150/350/700/1200', JSON.stringify(TUNING.PACKING_CAPACITY_UPGRADE_COSTS) === JSON.stringify([150, 350, 700, 1200]));
+  assert('Packing Capacity levels are exactly 18/24/32/40/50', JSON.stringify(TUNING.PACKING_CAPACITY_LEVELS) === JSON.stringify([18, 24, 32, 40, 50]));
+  assert('Packing Capacity upgrade costs are exactly 100/225/450/850', JSON.stringify(TUNING.PACKING_CAPACITY_UPGRADE_COSTS) === JSON.stringify([100, 225, 450, 850]));
   assert('Packing max level is 5', TUNING.PACKING_MAX_LEVEL === 5);
   assert('Shipping Speed levels are exactly 1.00/0.80/0.65/0.52/0.42', JSON.stringify(TUNING.SHIPPING_SPEED_LEVELS) === JSON.stringify([1.0, 0.8, 0.65, 0.52, 0.42]));
   assert('Shipping Speed upgrade costs are exactly 200/450/900/1600', JSON.stringify(TUNING.SHIPPING_SPEED_UPGRADE_COSTS) === JSON.stringify([200, 450, 900, 1600]));
@@ -161,30 +161,36 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   const game = new Game();
   clearAllSpecimens(game);
   assert('default packingCapacityLevel is 1', game.state.packingCapacityLevel === 1);
-  assert('default Packing capacity is 12', game.packingCapacity() === 12);
+  assert('default Packing capacity is 18', game.packingCapacity() === 18);
   assert('default shippingSpeedLevel is 1', game.state.shippingSpeedLevel === 1);
   assert('default Shipping cadence is 1.00s/apple', game.shippingCadenceSeconds() === 1.0);
 
   const field = game.state.fields[0] as Field;
   const variety = game.getVariety(field.varietyId)!;
 
-  // Fill the queue to exactly capacity via 12 real harvests.
+  // Fill the queue to exactly capacity (18) via 18 real harvests. The
+  // starter Line's Yield (50) only gives Field 1 exactly 12 simultaneously-
+  // active physical slots (see systems/economy.ts activeSlotCount) — fewer
+  // than the new capacity of 18 — so slot indices are reused cyclically via
+  // setSlot (which force-ripens a slot for test setup, same as everywhere
+  // else in this suite) rather than requiring 18 distinct physical slots.
   const activeNonSpecimen = field.slots.map((s, i) => i).filter((i) => field.slots[i].active && !field.slots[i].specimen);
-  assert('starter Field 1 has at least 12 non-specimen active slots to test with', activeNonSpecimen.length >= 12);
-  for (let k = 0; k < 12; k++) {
-    setSlot(field, activeNonSpecimen[k], true);
-    const ok = game.harvestFruitSlot(field.id, activeNonSpecimen[k]);
+  assert('starter Field 1 has at least one non-specimen active slot to test with', activeNonSpecimen.length > 0);
+  for (let k = 0; k < 18; k++) {
+    const idx = activeNonSpecimen[k % activeNonSpecimen.length];
+    setSlot(field, idx, true);
+    const ok = game.harvestFruitSlot(field.id, idx);
     assert(`normal harvest #${k + 1} succeeds below capacity`, ok === true);
   }
-  assert('queue occupancy counts toward capacity (12/12 now)', game.state.processingQueue.length === 12);
+  assert('queue occupancy counts toward capacity (18/18 now)', game.state.processingQueue.length === 18);
 
-  // 13th normal apple must be blocked. 12 harvests above rotated the
-  // productive set (see pickNextProductiveSlot) — the currently-active 12
+  // 19th normal apple must be blocked. The harvests above rotated the
+  // productive set (see pickNextProductiveSlot) — the currently-active
   // slots are very likely no longer the same physical indices as before, so
   // re-query the field's CURRENT active set rather than reusing the stale
   // pre-harvest `activeNonSpecimen` list.
   const blockedSlotIndex = field.slots.findIndex((s) => s.active);
-  assert('field still has an active slot to attempt the 13th (blocked) harvest on', blockedSlotIndex >= 0);
+  assert('field still has an active slot to attempt the 19th (blocked) harvest on', blockedSlotIndex >= 0);
   setSlot(field, blockedSlotIndex, true);
   const cashBefore = game.state.cash;
   const queueLenBefore = game.state.processingQueue.length;
@@ -199,13 +205,13 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   assert('failed harvest creates no queue item', game.state.processingQueue.length === queueLenBefore);
   assert('failed harvest pays no revenue', game.state.cash === cashBefore);
 
-  // Specimen harvest still works at 12/12 Packing.
+  // Specimen harvest still works at 18/18 Packing.
   const specimenSlotIndex = field.slots.findIndex((s, i) => i !== blockedSlotIndex && s.active);
   assert('field has another active slot for the Specimen-at-full-Packing check', specimenSlotIndex >= 0);
   setSlot(field, specimenSlotIndex, true, fakeSpecimen());
   const specimenResult = game.harvestFruitSlot(field.id, specimenSlotIndex);
-  assert('Specimen harvest succeeds even at full Packing (12/12)', specimenResult === true);
-  assert('Specimen harvest does not occupy a queue slot', game.state.processingQueue.length === 12);
+  assert('Specimen harvest succeeds even at full Packing (18/18)', specimenResult === true);
+  assert('Specimen harvest does not occupy a queue slot', game.state.processingQueue.length === 18);
   assert('Specimen went into the inventory, not the queue', game.state.specimens.length >= 1 && field.slots[specimenSlotIndex].specimen === null);
 
   // Pricing sanity: value used for capacity math still comes from the
@@ -226,18 +232,18 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   assert('insufficient-cash attempt does not change level', game.state.packingCapacityLevel === 1);
   assert('insufficient-cash attempt does not change cash', game.state.cash === 0);
 
-  game.state.cash = 150;
+  game.state.cash = 100;
   const ok1 = game.buyPackingCapacityUpgrade();
-  assert('Lv1->Lv2 purchase succeeds at exactly $150', ok1 === true);
-  assert('cash deducted exactly $150', game.state.cash === 0);
+  assert('Lv1->Lv2 purchase succeeds at exactly $100', ok1 === true);
+  assert('cash deducted exactly $100', game.state.cash === 0);
   assert('level is now 2', game.state.packingCapacityLevel === 2);
-  assert('capacity is now 18', game.packingCapacity() === 18);
+  assert('capacity is now 24', game.packingCapacity() === 24);
 
   game.state.cash = 10000;
-  game.buyPackingCapacityUpgrade(); // Lv2->3 ($350)
-  game.buyPackingCapacityUpgrade(); // Lv3->4 ($700)
-  game.buyPackingCapacityUpgrade(); // Lv4->5 ($1200)
-  assert('reached Lv5 (capacity 40)', game.state.packingCapacityLevel === 5 && game.packingCapacity() === 40);
+  game.buyPackingCapacityUpgrade(); // Lv2->3 ($225)
+  game.buyPackingCapacityUpgrade(); // Lv3->4 ($450)
+  game.buyPackingCapacityUpgrade(); // Lv4->5 ($850)
+  assert('reached Lv5 (capacity 50)', game.state.packingCapacityLevel === 5 && game.packingCapacity() === 50);
   const cashAtMax = game.state.cash;
   const overMax = game.buyPackingCapacityUpgrade();
   assert('cannot exceed Lv5', overMax === false);
@@ -308,7 +314,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   const game = new Game();
   clearAllSpecimens(game);
   const field = game.state.fields[0] as Field;
-  pushDummyQueueItems(game.state, 12); // Packing already full (12/12) before HARVEST ALL
+  pushDummyQueueItems(game.state, 18); // Packing already full (18/18) before HARVEST ALL
 
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
   const specimenIdx = activeSlots[0];
@@ -328,7 +334,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   assert('HARVEST ALL path: Specimen never enters the queue', game.state.processingQueue.length === queueBefore);
   assert('HARVEST ALL path: normal fruit is blocked once Packing is full', blocked1 === false && blocked2 === false);
   assert('HARVEST ALL path: blocked normal fruit stays ripe on the tree (no overflow deletion)', field.slots[normalIdx1].ripe === true && field.slots[normalIdx2].ripe === true);
-  assert('HARVEST ALL path: no overflow revenue paid', game.state.processingQueue.length === 12);
+  assert('HARVEST ALL path: no overflow revenue paid', game.state.processingQueue.length === 18);
 }
 
 // ===========================================================================
@@ -342,7 +348,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   const game = new Game();
   clearAllSpecimens(game);
   const field = game.state.fields[0] as Field;
-  pushDummyQueueItems(game.state, 10); // 10/12 occupied -> 2 free slots at Closing
+  pushDummyQueueItems(game.state, 16); // 16/18 occupied -> 2 free slots at Closing
 
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
   const specimenIdx = activeSlots[0];
@@ -360,7 +366,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   assert('growth freezes immediately (state.closing true)', game.state.closing === true);
   assert('Closing secures the ripe Specimen regardless of capacity', game.state.specimens.length === specimensBefore + 1);
   assert('Specimen slot is no longer ripe after Closing collection', field.slots[specimenIdx].ripe === false);
-  assert('free capacity (2) computed from existing 10/12 occupancy — queue is now 12', game.state.processingQueue.length === 12);
+  assert('free capacity (2) computed from existing 16/18 occupancy — queue is now 18', game.state.processingQueue.length === 18);
 
   const stillRipe = [normalIdxA, normalIdxB, normalIdxC].filter((i) => field.slots[i].ripe);
   assert('exactly one of the three normal ripe apples overflows (only 2 free slots existed)', stillRipe.length === 1);
@@ -386,7 +392,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   const game = new Game();
   clearAllSpecimens(game);
   const field = game.state.fields[0] as Field;
-  pushDummyQueueItems(game.state, 12); // already 12/12
+  pushDummyQueueItems(game.state, 18); // already 18/18
 
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
   const specimenIdx = activeSlots[0];
@@ -396,9 +402,9 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
 
   const specimensBefore = game.state.specimens.length;
   game.beginClosing();
-  assert('Closing secures ripe Specimens even when Packing is already 12/12', game.state.specimens.length === specimensBefore + 1);
+  assert('Closing secures ripe Specimens even when Packing is already 18/18', game.state.specimens.length === specimensBefore + 1);
   assert('zero normal apples collected when Packing was already full', field.slots[normalIdx].ripe === true);
-  assert('queue occupancy still exactly 12 (unchanged by the blocked normal apple)', game.state.processingQueue.length === 12);
+  assert('queue occupancy still exactly 18 (unchanged by the blocked normal apple)', game.state.processingQueue.length === 18);
 }
 
 // Highest-current-value-first priority + deterministic field-order tie-break.
@@ -428,7 +434,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
 
   // Only 1 free Packing slot: the highest-value apple (Field 2, SWEETEN)
   // must be chosen over any Field-1 NORMAL apple.
-  pushDummyQueueItems(game.state, 11);
+  pushDummyQueueItems(game.state, 17);
   game.beginClosing();
 
   assert('highest-current-value ripe fruit (Field 2, SWEETEN) is collected first', field2.slots[highValueSlot].ripe === false);
@@ -449,7 +455,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   setSlot(field1, f1SlotLow, true);
   setSlot(field2, f2SlotLow, true);
 
-  pushDummyQueueItems(game.state, 11); // exactly 1 free slot, values tied -> Field order decides
+  pushDummyQueueItems(game.state, 17); // exactly 1 free slot, values tied -> Field order decides
   game.beginClosing();
 
   assert('tie-break: earlier Field (Field 1) wins an equal-value tie', field1.slots[f1SlotLow].ripe === false);
@@ -464,7 +470,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   const game = new Game();
   clearAllSpecimens(game);
   const field = game.state.fields[0] as Field;
-  pushDummyQueueItems(game.state, 12); // Packing already full -> guarantees overflow
+  pushDummyQueueItems(game.state, 18); // Packing already full -> guarantees overflow
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
   const overflowSlot = activeSlots[0];
   setSlot(field, overflowSlot, true);
@@ -532,14 +538,15 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   clearAllSpecimens(game);
   // This check predates Freshness V1 and isn't about Freshness at all — it's
   // about overflow/Operating-Cost/totalRevenue accounting. Max Shipping
-  // Speed keeps the whole 12-item Final Shipment drain comfortably inside
-  // FRESHNESS_GRACE_SECONDS (see PROJECT.md "Freshness"), so every dummy
-  // item ships with 0 Freshness loss and the original "exactly 36" gross
-  // figure this check asserts stays exactly true; Freshness's own decay
-  // math is covered separately by scripts/verify-freshness.ts.
+  // Speed keeps the whole 18-item Final Shipment drain comfortably inside
+  // FRESHNESS_GRACE_SECONDS (see PROJECT.md "Freshness") — 18 * ~0.084s ≈
+  // 1.5s, still under the 2.0s grace window — so every dummy item ships
+  // with 0 Freshness loss and the "exactly 54" gross figure this check
+  // asserts stays exactly true; Freshness's own decay math is covered
+  // separately by scripts/verify-freshness.ts.
   game.state.shippingSpeedLevel = 5;
   const field = game.state.fields[0] as Field;
-  pushDummyQueueItems(game.state, 12); // guarantee overflow
+  pushDummyQueueItems(game.state, 18); // guarantee overflow
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
   const overflowSlot = activeSlots[0];
   setSlot(field, overflowSlot, true);
@@ -550,7 +557,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   assert('Operating Cost deducted exactly once this Closing', game.state.lastDayLog !== null);
   const expectedOpCost = 15 + game.unlockedFields().length * 20; // Day 1, matches operatingCost() formula
   assert('Operating Cost formula is unchanged by this pass', Math.abs((game.state.lastDayLog?.operatingCost ?? -1) - expectedOpCost) < 1e-6);
-  assert('totalRevenue only grew from the 12 dummy-queued items worth of gross shipping (36) + nothing from overflow', Math.abs(game.state.totalRevenue - totalRevenueBefore - 36) < 1e-6);
+  assert('totalRevenue only grew from the 18 dummy-queued items worth of gross shipping (54) + nothing from overflow', Math.abs(game.state.totalRevenue - totalRevenueBefore - 54) < 1e-6);
 }
 
 // ===========================================================================
@@ -586,19 +593,19 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   // still block new normal entries while occupancy >= capacity.
   clearStorage();
   const game = new Game();
-  pushDummyQueueItems(game.state, 20); // 20 > default Level-1 capacity of 12
+  pushDummyQueueItems(game.state, 25); // 25 > default Level-1 capacity of 18
   game.save();
   const reloaded = new Game();
   clearAllSpecimens(reloaded);
-  assert('an over-capacity legacy queue is preserved on load, never truncated', reloaded.state.processingQueue.length === 20);
-  assert('reloaded packingCapacityLevel still 1 (12) despite the larger legacy queue', reloaded.packingCapacity() === 12);
+  assert('an over-capacity legacy queue is preserved on load, never truncated', reloaded.state.processingQueue.length === 25);
+  assert('reloaded packingCapacityLevel still 1 (18) despite the larger legacy queue', reloaded.packingCapacity() === 18);
 
   const field = reloaded.state.fields[0] as Field;
   const slotIndex = field.slots.findIndex((s) => s.active);
   setSlot(field, slotIndex, true);
   const blocked = reloaded.harvestFruitSlot(field.id, slotIndex);
   assert('no new normal fruit can enter while the legacy queue is over capacity', blocked === false);
-  assert('the over-capacity queue is left exactly as-is (still 20, not truncated further)', reloaded.state.processingQueue.length === 20);
+  assert('the over-capacity queue is left exactly as-is (still 25, not truncated further)', reloaded.state.processingQueue.length === 25);
 
   // Draining it below capacity must re-open normal harvesting.
   let guard = 0;
@@ -639,13 +646,16 @@ function simulateFruitSlotClick(attemptHarvest: (slotIndex: number) => boolean, 
   const field = game.state.fields[0] as Field;
   const attemptHarvest = (slotIndex: number) => game.harvestFruitSlot(field.id, slotIndex);
 
-  // Fill Packing to capacity.
+  // Fill Packing to capacity (18) — cyclically reusing the field's fewer
+  // (12) active physical slots via setSlot's force-ripen, same as the
+  // CAPACITY section above.
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
-  for (let k = 0; k < 12; k++) {
-    setSlot(field, activeSlots[k], true);
-    assert(`setup harvest #${k + 1} fills Packing`, game.harvestFruitSlot(field.id, activeSlots[k]) === true);
+  for (let k = 0; k < 18; k++) {
+    const idx = activeSlots[k % activeSlots.length];
+    setSlot(field, idx, true);
+    assert(`setup harvest #${k + 1} fills Packing`, game.harvestFruitSlot(field.id, idx) === true);
   }
-  assert('setup: Packing is now at capacity (12/12)', game.state.processingQueue.length === 12);
+  assert('setup: Packing is now at capacity (18/18)', game.state.processingQueue.length === 18);
 
   // Attempt a direct click/harvest of one more ripe normal fruit.
   const targetSlot = field.slots.findIndex((s) => s.active);
@@ -679,12 +689,12 @@ function simulateFruitSlotClick(attemptHarvest: (slotIndex: number) => boolean, 
   // Successful harvest still works normally (capacity now free after
   // draining one item off the front of the queue).
   game.update(1.1); // ships exactly the head item at Lv1's 1.0s/apple cadence
-  assert('setup: Packing now has exactly 1 free slot', game.state.processingQueue.length === 11);
+  assert('setup: Packing now has exactly 1 free slot', game.state.processingQueue.length === 17);
   const successResult = simulateFruitSlotClick(attemptHarvest, targetSlot);
   assert('a normal harvest still succeeds once Packing has a free slot again', successResult.harvested === true);
   assert('a successful harvest DOES invoke the visual removal/pop path', successResult.visualRemovalInvoked === true);
   assert('a successful harvest actually clears the slot (no longer ripe)', field.slots[targetSlot].ripe === false);
-  assert('a successful harvest enqueues exactly one item', game.state.processingQueue.length === 12);
+  assert('a successful harvest enqueues exactly one item', game.state.processingQueue.length === 18);
 
   // Specimen harvest still works at full Packing, through the identical
   // click contract.
@@ -693,8 +703,8 @@ function simulateFruitSlotClick(attemptHarvest: (slotIndex: number) => boolean, 
   setSlot(field, specimenSlot, true, fakeSpecimen({ id: 'contract-check-specimen' }));
   const specimensBefore = game.state.specimens.length;
   const specimenClick = simulateFruitSlotClick(attemptHarvest, specimenSlot);
-  assert('Specimen harvest succeeds through the same click contract even at 12/12 Packing', specimenClick.harvested === true && specimenClick.visualRemovalInvoked === true);
-  assert('Specimen went into the inventory, not the queue', game.state.specimens.length === specimensBefore + 1 && game.state.processingQueue.length === 12);
+  assert('Specimen harvest succeeds through the same click contract even at 18/18 Packing', specimenClick.harvested === true && specimenClick.visualRemovalInvoked === true);
+  assert('Specimen went into the inventory, not the queue', game.state.specimens.length === specimensBefore + 1 && game.state.processingQueue.length === 18);
 }
 
 // HARVEST ALL leaves overflow fruit fully intact (data + visual contract),
@@ -705,7 +715,7 @@ function simulateFruitSlotClick(attemptHarvest: (slotIndex: number) => boolean, 
   const game = new Game();
   clearAllSpecimens(game);
   const field = game.state.fields[0] as Field;
-  pushDummyQueueItems(game.state, 12);
+  pushDummyQueueItems(game.state, 18);
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
   const overflowA = activeSlots[0];
   const overflowB = activeSlots[1];

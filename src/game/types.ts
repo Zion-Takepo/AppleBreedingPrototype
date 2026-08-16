@@ -186,6 +186,22 @@ export interface BreedingState {
   breedTargetTotal: number | null;
 }
 
+// Lightweight first-session onboarding (see PROJECT.md "First-session
+// onboarding") — a small explicit state machine, not a full tutorial
+// framework. `step` is the player's CURRENT goal; it only ever advances
+// forward (see Game.advanceOnboardingTo), never regresses, so completing
+// steps out of the expected order (e.g. harvesting the guaranteed Specimen
+// before ever harvesting a normal apple) safely skips ahead instead of
+// getting the player stuck. `dismissed` (SKIP GUIDE) independently and
+// permanently hides the objective banner for this save without altering
+// `step` or any game progression/rewards.
+export type OnboardingStep = 'HARVEST_APPLE' | 'FIND_SPECIMEN' | 'OPEN_BREED' | 'START_BREED' | 'KEEP_OFFSPRING' | 'COMPLETE';
+
+export interface OnboardingState {
+  step: OnboardingStep;
+  dismissed: boolean;
+}
+
 export type MarketModifiers = Partial<Record<AppleColor | ApplePattern, number>>;
 
 export type MarketTrend = 'RISING' | 'STABLE' | 'FALLING';
@@ -321,4 +337,15 @@ export interface GameState {
   highestSweetnessEver: number;
   largestSizeEver: number;
   hasUnseenDiscovery: boolean;
+  // First-session onboarding (see OnboardingState doc comment above).
+  onboarding: OnboardingState;
+  // Pre-Closing warning (see PROJECT.md "Pre-Closing warning") — fires at
+  // most once per day (at 17:00), reset every day transition
+  // (advanceDayInternal). Replaced the original two-flag (17:30/17:50)
+  // pair with one clean flag — see systems/save.ts migrateState for how an
+  // old two-flag save is folded into this one.
+  closingWarningShown: boolean;
+  // One-time-ever Market discoverability hint (see PROJECT.md "Market
+  // discoverability") — never resets, shown at most once per save.
+  marketHintShown: boolean;
 }

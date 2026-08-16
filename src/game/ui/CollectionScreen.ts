@@ -52,24 +52,54 @@ export class CollectionScreen extends Phaser.GameObjects.Container {
     const state = this.game.state;
     const y0 = 120;
 
+    // OWNED vs DISCOVERED-ONLY is derived live from current Library contents
+    // every render — never persisted — so it can never drift out of sync
+    // with Library changes (keep/archive/etc), matching the same
+    // "OWNED = derived from Library" rule MarketScreen.ts already uses for
+    // visualId ownership. Color/Pattern are genetic traits (entirely
+    // separate from Visual Rarity/visualId — see PROJECT.md), so ownership
+    // here means "the Library currently contains at least one kept Line
+    // with this Color/Pattern," not visualId ownership.
+    const ownedColors = new Set(state.library.map((v) => v.color));
+    const ownedPatterns = new Set(state.library.map((v) => v.pattern));
+
     this.content.add(panel(this.scene, 40, y0, 740, 600, THEME.panelBg, THEME.panelBorder, 20));
     this.content.add(mkText(this.scene, 72, y0 + 24, 'COLOR', 28, THEME.textDark, true));
-    COLORS.forEach((c, i) => this.drawTraitRow(72, y0 + 80 + i * 60, c, state.discoveredColors.includes(c)));
-    this.drawTraitRow(72, y0 + 80 + COLORS.length * 60, '????', false);
+    COLORS.forEach((c, i) => this.drawTraitRow(72, y0 + 80 + i * 60, c, state.discoveredColors.includes(c), ownedColors.has(c)));
+    this.drawTraitRow(72, y0 + 80 + COLORS.length * 60, '????', false, false);
 
     this.content.add(panel(this.scene, 820, y0, 740, 600, THEME.panelBg, THEME.panelBorder, 20));
     this.content.add(mkText(this.scene, 852, y0 + 24, 'PATTERN', 28, THEME.textDark, true));
-    PATTERNS.forEach((p, i) => this.drawTraitRow(852, y0 + 80 + i * 60, p, state.discoveredPatterns.includes(p)));
-    this.drawTraitRow(852, y0 + 80 + PATTERNS.length * 60, '????', false);
+    PATTERNS.forEach((p, i) => this.drawTraitRow(852, y0 + 80 + i * 60, p, state.discoveredPatterns.includes(p), ownedPatterns.has(p)));
+    this.drawTraitRow(852, y0 + 80 + PATTERNS.length * 60, '????', false, false);
   }
 
-  private drawTraitRow(x: number, y: number, label: string, discovered: boolean): void {
+  // The check mark (✓) now unmistakably means OWNED — a kept Library Line
+  // currently has this trait — never merely DISCOVERED (seen as a Breed
+  // candidate, including the Day-1 Yellow / Day-5 Purple-or-Striped
+  // scripted guarantees, without ever being KEPT). A DISCOVERED-but-not-
+  // OWNED trait shows the distinct "SEEN" label instead of the ownership
+  // check, so it can never be mistaken for ownership (see PROJECT.md
+  // "DISCOVERED != OWNED"). An undiscovered trait keeps its existing '?'
+  // treatment, unchanged.
+  private drawTraitRow(x: number, y: number, label: string, discovered: boolean, owned: boolean): void {
     const isFuture = label === '????';
-    const known = !isFuture && discovered;
-    this.content.add(mkText(this.scene, x, y, label, 26, isFuture ? THEME.textMid : THEME.textDark, known));
-    const mark = known ? '✓' : '?';
-    const markColor = known ? '#2f5a20' : '#a89a6a';
-    this.content.add(mkText(this.scene, x + 440, y, mark, 28, markColor, true));
+    const shown = !isFuture && discovered;
+    this.content.add(mkText(this.scene, x, y, label, 26, isFuture ? THEME.textMid : THEME.textDark, shown));
+
+    let mark: string;
+    let markColor: string;
+    if (!shown) {
+      mark = '?';
+      markColor = '#a89a6a';
+    } else if (owned) {
+      mark = '✓';
+      markColor = '#2f5a20';
+    } else {
+      mark = 'SEEN';
+      markColor = '#b8860b';
+    }
+    this.content.add(mkText(this.scene, x + 440, y, mark, mark.length > 1 ? 20 : 28, markColor, true));
   }
 
   private drawVarieties(): void {

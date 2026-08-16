@@ -38,21 +38,46 @@ export function createModal(scene: Phaser.Scene, w: number, h: number, panelColo
   };
 }
 
+interface QueuedToast {
+  message: string;
+  color: number;
+}
+
+// One small FIFO queue for transient toasts (see PROJECT.md "Serialize
+// notifications") — every screen shares a single ToastQueue instance (see
+// MainScene.create()), so queuing here is enough to guarantee at most one
+// toast is ever visible at once, in trigger order, across every call site
+// (breeding/trait/specimen/packing/warning/onboarding/market-hint/field/
+// contest toasts alike) without touching any of them individually.
 export class ToastQueue {
   private scene: Phaser.Scene;
+  private queue: QueuedToast[] = [];
+  private presenting = false;
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
   }
 
   show(message: string, color = THEME.gold): void {
+    this.queue.push({ message, color });
+    if (!this.presenting) this.presentNext();
+  }
+
+  private presentNext(): void {
+    const next = this.queue.shift();
+    if (!next) {
+      this.presenting = false;
+      return;
+    }
+    this.presenting = true;
+
     const scene = this.scene;
     const container = scene.add.container(LAYOUT.width / 2, 92);
     container.setDepth(2000);
-    const w = Math.min(720, 80 + message.length * 15);
-    const bg = panel(scene, -w / 2, -28, w, 56, color, 0x000000, 16);
+    const w = Math.min(720, 80 + next.message.length * 15);
+    const bg = panel(scene, -w / 2, -28, w, 56, next.color, 0x000000, 16);
     const t = scene.add
-      .text(0, 0, message, { fontFamily: THEME.font, fontSize: '26px', color: '#1c1c14', fontStyle: 'bold' })
+      .text(0, 0, next.message, { fontFamily: THEME.font, fontSize: '26px', color: '#1c1c14', fontStyle: 'bold' })
       .setOrigin(0.5);
     container.add([bg, t]);
     container.setAlpha(0);
@@ -71,7 +96,12 @@ export class ToastQueue {
             alpha: 0,
             y: 40,
             duration: 220,
-            onComplete: () => container.destroy(),
+            onComplete: () => {
+              container.destroy();
+              // Next queued toast (if any) only starts its own entrance
+              // once this one has fully finished — never overlapping.
+              this.presentNext();
+            },
           });
         });
       },

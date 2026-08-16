@@ -45,8 +45,12 @@ export const TUNING = {
   // *_UPGRADE_COSTS[i] is the cost to go from Level i+1 to Level i+2 (i.e.
   // costs[0] = Lv1->Lv2 price), one entry shorter than the level table
   // since Level 1 is owned by default and MAX has no further upgrade.
-  PACKING_CAPACITY_LEVELS: [12, 18, 24, 32, 40] as const,
-  PACKING_CAPACITY_UPGRADE_COSTS: [150, 350, 700, 1200] as const,
+  // Revised V1 table (see PROJECT.md "First-session onboarding" section 11
+  // — the original Level 1 (12) was found too restrictive for a new
+  // player's first session; only these tuning numbers changed, the
+  // capacity/upgrade mechanics themselves are unchanged).
+  PACKING_CAPACITY_LEVELS: [18, 24, 32, 40, 50] as const,
+  PACKING_CAPACITY_UPGRADE_COSTS: [100, 225, 450, 850] as const,
   PACKING_MAX_LEVEL: 5,
 
   // SHIPPING SPEED = seconds the queue's head item spends processing per
@@ -219,6 +223,15 @@ export const TUNING = {
   FRESHNESS_BASE_LOSS_PER_SECOND: 0.02, // 2%/s of locked value after grace, at Freshness 0
   FRESHNESS_MAX_PROTECTION: 0.8, // Freshness 100 cuts the loss rate by 80%
   FRESHNESS_MAX_LOSS: 0.3, // an apple can never lose more than 30% of its locked value, however long it waits
+
+  // Pre-Closing warning (see PROJECT.md "Pre-Closing warning" and
+  // systems/clock.ts dayTimeRemainingAtClock) — fires once, keyed off the
+  // existing digital day clock (not real wall-clock seconds), reset every
+  // day. Automatic 18:00 Closing itself is unchanged; this is a pure
+  // UI/audio heads-up cue layered on top of it. Revised from the original
+  // two-warning (17:30 + 17:50) table to a single 17:00 warning — human
+  // playtesting found two warnings unnecessary.
+  CLOSING_WARNING_CLOCK: { hour: 17, minute: 0 },
 } as const;
 
 export const COLORS = ['Red', 'Green', 'Yellow', 'Purple'] as const;

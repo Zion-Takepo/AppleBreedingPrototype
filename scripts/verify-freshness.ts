@@ -356,10 +356,20 @@ const approx = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   const game = new Game();
   clearAllSpecimens(game);
   const field = game.state.fields[0] as Field;
+  // Field 1's Yield only gives 12 simultaneously-active physical slots —
+  // fewer than Level-1 Packing capacity (18) — so slot indices are reused
+  // cyclically via setSlot's force-ripen to fill the queue to capacity (see
+  // the identical pattern in verify-shipping-infrastructure.ts). set+harvest
+  // must happen in the SAME iteration (not two separate loops) since a
+  // reused index may already have been harvested (and rotated to a
+  // different physical slot) by an earlier iteration.
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
-  for (let k = 0; k < 12; k++) setSlot(field, activeSlots[k], true); // fill Packing to Level-1 capacity (12)
-  for (let k = 0; k < 12; k++) game.harvestFruitSlot(field.id, activeSlots[k]);
-  assert('setup: Packing is now full', game.state.processingQueue.length === 12);
+  for (let k = 0; k < 18; k++) {
+    const idx = activeSlots[k % activeSlots.length];
+    setSlot(field, idx, true);
+    game.harvestFruitSlot(field.id, idx);
+  }
+  assert('setup: Packing is now full', game.state.processingQueue.length === 18);
 
   const overflowSlot = field.slots.findIndex((s) => s.active);
   setSlot(field, overflowSlot, true); // ripe, but blocked by full Packing -> stays on tree
@@ -456,8 +466,11 @@ const approx = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   clearAllSpecimens(game);
   const field = game.state.fields[0] as Field;
   const activeSlots = field.slots.map((_, i) => i).filter((i) => field.slots[i].active);
-  for (let k = 0; k < 12; k++) setSlot(field, activeSlots[k], true);
-  for (let k = 0; k < 12; k++) game.harvestFruitSlot(field.id, activeSlots[k]);
+  for (let k = 0; k < 18; k++) {
+    const idx = activeSlots[k % activeSlots.length];
+    setSlot(field, idx, true);
+    game.harvestFruitSlot(field.id, idx);
+  }
   const targetSlot = field.slots.findIndex((s) => s.active);
   setSlot(field, targetSlot, true);
   const before = { ...field.slots[targetSlot] };

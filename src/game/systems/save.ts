@@ -1,5 +1,5 @@
 import { TUNING } from '../tuning.ts';
-import type { BreedingSpecimen, DayLogEntry, GameState, Variety } from '../types.ts';
+import type { BreedingSpecimen, DayLogEntry, GameState, OnboardingStep, Variety } from '../types.ts';
 import { APPLE_RARITY } from '../render/appleAssets.ts';
 import { activeSlotIndices, allSlotsActive, makeInitialFruitSlots } from './economy.ts';
 import { initVisualMarketEntry } from './market.ts';
@@ -258,6 +258,43 @@ function migrateState(state: GameState): void {
       field.policy = field.pendingPolicy;
       field.pendingPolicy = null;
     }
+  }
+
+  // First-session onboarding (see PROJECT.md "First-session onboarding")
+  // — a save written before this pass has no `onboarding` at all. Rather
+  // than always restarting an experienced save's tutorial from step 1 (a
+  // confusing regression for someone already deep into the game), infer
+  // "already experienced" from existing save data — having ever bred, or
+  // owning more Lines than the two starters — and skip straight to
+  // COMPLETE for those saves; a save that's still genuinely fresh (Day 1,
+  // only the two starter Lines, never bred) starts the guide normally. Only
+  // ever runs for a save with no `onboarding` field at all — an existing
+  // in-progress onboarding save (post-this-pass) is validated, not
+  // reinferred.
+  const legacyOnboarding = (state as Partial<GameState>).onboarding;
+  if (!legacyOnboarding || typeof legacyOnboarding !== 'object') {
+    const alreadyExperienced = state.breeding?.everBredOnce === true || (Array.isArray(state.library) && state.library.length > 2);
+    state.onboarding = { step: alreadyExperienced ? 'COMPLETE' : 'HARVEST_APPLE', dismissed: false };
+    if (typeof state.marketHintShown !== 'boolean') state.marketHintShown = alreadyExperienced;
+  } else {
+    const validSteps: OnboardingStep[] = ['HARVEST_APPLE', 'FIND_SPECIMEN', 'OPEN_BREED', 'START_BREED', 'KEEP_OFFSPRING', 'COMPLETE'];
+    if (!validSteps.includes(legacyOnboarding.step)) state.onboarding.step = 'HARVEST_APPLE';
+    if (typeof legacyOnboarding.dismissed !== 'boolean') state.onboarding.dismissed = false;
+  }
+  if (typeof state.marketHintShown !== 'boolean') state.marketHintShown = false;
+
+  // Pre-Closing warning consolidation (see PROJECT.md "Pre-Closing
+  // warning") — replaced the old two-flag (17:30/17:50) pair with one
+  // clean `closingWarningShown` flag. A save written before this pass has
+  // no `closingWarningShown` at all; if either legacy flag was already
+  // true, the player is already past 17:00 too (17:00 is strictly earlier
+  // than both old thresholds), so the new flag safely starts true to avoid
+  // a surprise late-day warning firing on reload — otherwise it starts
+  // false exactly like a save that predates the whole pre-closing-warning
+  // feature.
+  if (typeof state.closingWarningShown !== 'boolean') {
+    const legacy = state as unknown as { closingWarning30Shown?: boolean; closingWarning10Shown?: boolean };
+    state.closingWarningShown = legacy.closingWarning30Shown === true || legacy.closingWarning10Shown === true;
   }
 }
 

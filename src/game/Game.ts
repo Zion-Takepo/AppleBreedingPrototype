@@ -8,6 +8,7 @@ import type {
   Field,
   FieldFruitSlot,
   GameState,
+  OnboardingStep,
   Variety,
 } from './types.ts';
 import { breedOffspring, statsOf, type BreedParent } from './systems/breeding.ts';
@@ -29,6 +30,7 @@ import {
 } from './systems/economy.ts';
 import { advanceDailyMarket, initVisualMarket, initVisualMarketEntry } from './systems/market.ts';
 import { realizedShippingValue } from './systems/freshness.ts';
+import { dayTimeRemainingAtClock } from './systems/clock.ts';
 import { clearSave, loadState, saveState } from './systems/save.ts';
 import { freshStarterLines, STARTER_GREEN, STARTER_RED } from './systems/starterLines.ts';
 import {
@@ -39,6 +41,17 @@ import {
   rollOrchardSpecimen,
 } from './systems/specimen.ts';
 import type { AppleAssetId } from './render/appleAssets.ts';
+
+// Pre-Closing warning threshold, computed once from the digital clock
+// mapping (see PROJECT.md "Pre-Closing warning") rather than a second,
+// independently tuned real-time duration.
+const CLOSING_WARNING_SECONDS = dayTimeRemainingAtClock(TUNING.CLOSING_WARNING_CLOCK.hour, TUNING.CLOSING_WARNING_CLOCK.minute);
+
+// The player's current onboarding goal only ever advances forward through
+// this fixed order (see Game.advanceOnboardingTo) — never regresses, and an
+// out-of-order action (e.g. finding the Specimen before ever harvesting a
+// normal apple) simply jumps past whichever earlier steps it also satisfies.
+const ONBOARDING_STEP_ORDER: OnboardingStep[] = ['HARVEST_APPLE', 'FIND_SPECIMEN', 'OPEN_BREED', 'START_BREED', 'KEEP_OFFSPRING', 'COMPLETE'];
 
 function makeField(id: number, unlocked: boolean, varietyId: string | null, fractionGrown: number, variety: Variety | null): Field {
   const active = variety ? activeSlotIndices(variety.id, variety.yieldStat) : allSlotsActive();
@@ -119,6 +132,9 @@ function createInitialState(): GameState {
     highestSweetnessEver: Math.max(STARTER_RED.sweetness, STARTER_GREEN.sweetness),
     largestSizeEver: Math.max(STARTER_RED.size, STARTER_GREEN.size),
     hasUnseenDiscovery: false,
+    onboarding: { step: 'HARVEST_APPLE', dismissed: false },
+    closingWarningShown: false,
+    marketHintShown: false,
   };
 }
 
@@ -133,6 +149,21 @@ export type GameEvent =
   // from harvestFruitSlot; UI listeners should throttle their own feedback
   // since a hold-and-sweep drag can trigger this repeatedly in one gesture.
   | { type: 'packingFull' }
+  // Pre-Closing warning (see PROJECT.md "Pre-Closing warning") — fires at
+  // most once per day, at 17:00 (one hour before automatic 18:00 Closing).
+  | { type: 'closingWarning' }
+  // Fired the instant beginClosing() runs, before its collection sequence —
+  // `automatic` distinguishes the timer hitting 0 (18:00) from a manual END
+  // DAY click, since only the automatic case needs the surprise-transition
+  // cue (see PROJECT.md "18:00 Closing cue").
+  | { type: 'closingBegan'; automatic: boolean }
+  // First-session onboarding reached its final step (see PROJECT.md
+  // "First-session onboarding" section 6/completion).
+  | { type: 'onboardingComplete' }
+  // Fired at the end of every day transition (advanceDayInternal) — used to
+  // anchor the one-time Market discoverability hint's fallback trigger (see
+  // PROJECT.md "Market discoverability").
+  | { type: 'dayAdvanced' }
   | { type: 'changed' };
 
 type Listener = (event: GameEvent) => void;
@@ -176,6 +207,40 @@ export class Game {
   getVariety(id: string | null): Variety | undefined {
     if (!id) return undefined;
     return this.state.library.find((v) => v.id === id);
+  }
+
+  // ----------------------------------------------------------------
+  // First-session onboarding (see PROJECT.md "First-session onboarding")
+  // ----------------------------------------------------------------
+
+  /** Advances the onboarding goal to `step` — a no-op if `step` isn't strictly further along than the current one, so calling this from multiple action paths (harvest, breed, keep) is always safe and never regresses progress. */
+  private advanceOnboardingTo(step: OnboardingStep): void {
+    const cur = ONBOARDING_STEP_ORDER.indexOf(this.state.onboarding.step);
+    const next = ONBOARDING_STEP_ORDER.indexOf(step);
+    if (next <= cur) return;
+    this.state.onboarding.step = step;
+    if (step === 'COMPLETE') this.emit({ type: 'onboardingComplete' });
+  }
+
+  /** Called by the UI when the player navigates to the BREED tab — advances the OPEN_BREED onboarding goal; a no-op at any other step (including if it's already been passed). */
+  onboardingBreedScreenOpened(): void {
+    if (this.state.onboarding.step !== 'OPEN_BREED') return;
+    this.advanceOnboardingTo('START_BREED');
+    this.notify();
+  }
+
+  /** SKIP GUIDE — permanently hides the onboarding objective banner for this save. Never alters `step`/game progression/rewards (see PROJECT.md section 4's explicit requirement). */
+  skipOnboarding(): void {
+    if (this.state.onboarding.dismissed) return;
+    this.state.onboarding.dismissed = true;
+    this.notify();
+  }
+
+  /** One-time-ever Market discoverability hint (see PROJECT.md "Market discoverability") — idempotent, so it's safe for the UI to call this from more than one trigger point. */
+  markMarketHintShown(): void {
+    if (this.state.marketHintShown) return;
+    this.state.marketHintShown = true;
+    this.notify();
   }
 
   // ----------------------------------------------------------------
@@ -245,13 +310,29 @@ export class Game {
       if (this.state.dayActive) {
         this.state.dayTimeRemaining = Math.max(0, this.state.dayTimeRemaining - dtSeconds);
         changed = true;
+
+        // Pre-Closing warning (see PROJECT.md "Pre-Closing warning") — fires
+        // at most once per day (guarded by its own persisted flag, reset in
+        // advanceDayInternal), keyed off the digital clock via
+        // dayTimeRemainingAtClock rather than real wall-clock seconds.
+        // Gated on `dayActive` (this whole block), so a manual END DAY that
+        // closes the day before the threshold is reached can never fire it
+        // afterward — dayActive is already false by then and this block
+        // simply stops decrementing/checking.
+        if (!this.state.closingWarningShown && this.state.dayTimeRemaining <= CLOSING_WARNING_SECONDS) {
+          this.state.closingWarningShown = true;
+          this.emit({ type: 'closingWarning' });
+        }
       }
       // 18:00 (dayTimeRemaining hits 0) triggers the exact same Closing
       // procedure a manual END DAY click does (see beginClosing) — idempotent,
       // so this firing again on a later frame (or DebugPanel's "Skip Day
       // Timer" setting dayTimeRemaining=0 directly) can't double-close.
+      // `true` marks this as the AUTOMATIC trigger (see PROJECT.md "18:00
+      // Closing cue") — a manual END DAY click goes through MainScene calling
+      // beginClosing() with no argument (defaults to false) instead.
       if (this.state.dayActive && this.state.dayTimeRemaining <= 0) {
-        this.beginClosing();
+        this.beginClosing(true);
         changed = true;
       }
 
@@ -637,6 +718,11 @@ export class Game {
       // specimen generated when this fruit appeared is what's kept.
       this.state.specimens.push(specimen);
       this.emit({ type: 'specimenAcquired', specimen });
+      // Satisfies both onboarding step A (harvest an apple) and step B (find
+      // the Specimen) at once if the player finds the Specimen first — see
+      // PROJECT.md "Onboarding robustness" (advanceOnboardingTo only ever
+      // moves forward, so this is safe regardless of which step is current).
+      this.advanceOnboardingTo('OPEN_BREED');
       this.notify();
       return true;
     }
@@ -656,6 +742,9 @@ export class Game {
       this.state.processingTimer = this.processingCadenceSeconds();
     }
 
+    // Onboarding step A: harvest a normal apple (see PROJECT.md
+    // "First-session onboarding").
+    this.advanceOnboardingTo('FIND_SPECIMEN');
     this.notify();
     return true;
   }
@@ -834,6 +923,8 @@ export class Game {
       strongerParentTotal: null,
       breedTargetTotal: null,
     };
+    // Onboarding step D: choose parents and start breeding.
+    this.advanceOnboardingTo('KEEP_OFFSPRING');
     this.notify();
     return true;
   }
@@ -904,6 +995,10 @@ export class Game {
       strongerParentTotal: null,
       breedTargetTotal: null,
     };
+    // Onboarding step E: keep an offspring — the final onboarding step (see
+    // advanceOnboardingTo, which emits 'onboardingComplete' on this exact
+    // transition).
+    this.advanceOnboardingTo('COMPLETE');
     this.notify();
     return variety;
   }
@@ -1043,10 +1138,14 @@ export class Game {
    * which is what keeps Packing Capacity meaningful during Closing instead
    * of a repeated collect-then-flush loop erasing it.
    */
-  beginClosing(): boolean {
+  beginClosing(automatic = false): boolean {
     if (this.state.closing || this.state.dayEnded) return false;
     this.state.dayActive = false;
     this.state.closing = true;
+    // See PROJECT.md "18:00 Closing cue" — `automatic` distinguishes the
+    // 18:00 timer trigger (update() above) from a manual END DAY click, so
+    // the UI can show the surprise-transition cue only for the former.
+    this.emit({ type: 'closingBegan', automatic });
 
     // A still-running normal-cadence head timer is clamped DOWN to the
     // (faster) Final Shipment cadence the instant Closing begins — never
@@ -1214,10 +1313,18 @@ export class Game {
     this.state.dayMarketBonus = 0;
     this.state.dayContestPrize = 0;
     this.state.dayFreshnessLoss = 0;
+    // Pre-Closing warning resets every day (see PROJECT.md "Pre-Closing
+    // warning") — may fire at most once per NEW day.
+    this.state.closingWarningShown = false;
     // Handles the Day 1->2 transition spawning the Day-2 guarantee
     // immediately (rather than only on the next reload) — safe/idempotent
     // on every other day transition since it's gated on day===1/day===2.
     this.maybeSpawnGuaranteedSpecimen();
+    // Anchors the Market discoverability hint's fallback trigger (see
+    // PROJECT.md "Market discoverability") — the UI shows it at most once
+    // ever, guarded by state.marketHintShown, regardless of how many times
+    // this event fires.
+    this.emit({ type: 'dayAdvanced' });
     this.notify();
   }
 }

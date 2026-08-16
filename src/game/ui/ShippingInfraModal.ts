@@ -75,6 +75,22 @@ export function openShippingInfraModal(scene: Phaser.Scene, game: Game): void {
   // leaves everything unchanged, so re-rendering is always safe/idempotent).
   packingElems.onBuyClicked = refreshAll;
   speedElems.onBuyClicked = refreshAll;
+
+  // Live cash binding — this modal has no periodic refresh of its own
+  // (unlike the HUD/active screen, which MainScene re-renders on its own
+  // interval): without this, affordability could go stale while the modal
+  // sits open and a background shipment pays cash into GameState.cash (see
+  // Game.update()'s Shipping drain). Every element above already reads
+  // game.state.cash/packingCapacityLevel/shippingSpeedLevel live via the
+  // TrackSpec closures — never a second cached cash value — so simply
+  // re-running refreshAll() every scene frame this modal is open keeps it
+  // exactly current, torn down the instant the modal closes.
+  scene.events.on('update', refreshAll);
+  const rawClose = modal.close;
+  modal.close = () => {
+    scene.events.off('update', refreshAll);
+    rawClose();
+  };
 }
 
 interface TrackSpec {

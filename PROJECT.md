@@ -33,6 +33,234 @@ event, END DAY button). Nav tabs show a small red dot when a screen has a
 pending useful action (harvest ready, breeding result ready, unseen trait
 discovery).
 
+## First-session onboarding
+
+**Implemented.** Human playtesting found that a new player could harvest
+apples for 10-20 seconds, never realize the game was actually about
+breeding, never reach BREED, and quit. This is a lightweight, state-driven
+coach system — not a blocking tutorial — that deliberately leads a first-time
+player HARVEST → notice Packing/shipping → find the Day-1 guaranteed
+Specimen → open BREED → use it as a parent → BREED → inspect the four
+candidates → KEEP one.
+
+**State** (`types.ts` `OnboardingState`, `GameState.onboarding`): just
+`{ step, dismissed }`. `step` is the player's CURRENT goal — one of
+`HARVEST_APPLE → FIND_SPECIMEN → OPEN_BREED → START_BREED →
+KEEP_OFFSPRING → COMPLETE` — and only ever advances forward
+(`Game.advanceOnboardingTo()`, a no-op unless the target step is strictly
+further along than the current one). `dismissed` is set once by SKIP GUIDE
+and independently hides the objective banner forever for this save without
+touching `step` or any game progression/rewards.
+
+**Progression hooks** — each lives on the exact existing action method, no
+separate tracking layer:
+
+- `Game.harvestFruitSlot()`: a normal apple harvest advances
+  `HARVEST_APPLE → FIND_SPECIMEN`; harvesting a Specimen (via the same
+  method's specimen branch) advances straight to `OPEN_BREED` — since
+  `advanceOnboardingTo` only ever moves forward, a player who finds the
+  Specimen FIRST (before ever harvesting a normal apple) safely jumps past
+  both A and B in one step rather than getting stuck waiting for the
+  "expected" order. This also means `beginClosing()`'s own "secure every
+  ripe Specimen" collection step can itself advance onboarding if it
+  happens to sweep up a still-uncollected guaranteed Specimen at Closing.
+- `MainScene.showScreen()` calls `Game.onboardingBreedScreenOpened()` on
+  every navigation to the BREED tab — advances `OPEN_BREED → START_BREED`,
+  a no-op at any other step.
+- `Game.startBreeding()`: a successful call advances `START_BREED →
+  KEEP_OFFSPRING`.
+- `Game.keepOffspring()`: a successful call advances `→ COMPLETE` and emits
+  a one-time `'onboardingComplete'` event, which `MainScene` turns into a
+  short toast ("NEW LINE CREATED — Breed again to improve stats, specialize
+  traits, or preserve a visual lineage.") via the existing `ToastQueue` — no
+  new notification widget. Once `step === 'COMPLETE'` the objective banner
+  stops rendering for good; there is no large mandatory tutorial and no
+  further nagging.
+
+**UI** (`ui/OnboardingBanner.ts`): one reusable compact card (never a full
+modal, never scattered text boxes), redrawn only when the step actually
+changes. Fixed top-right placement (`x=1110, y=68, w=372`, dynamic height)
+was chosen specifically because it stays clear of every other screen's own
+top-of-content elements at the two screens it's shown on — Orchard's field
+tabs sit top-LEFT, and Breed's Parent A/B cards / offspring-candidate cards
+/ "i" stat-info button all start further down or further right. It is only
+shown while ORCHARD or BREED is the active screen (the two screens the
+onboarding path actually leads through) — Calendar's full-width day-chip
+strip occupies this exact same top band, so showing it there was skipped
+rather than fought pixel-by-pixel; the underlying `onboarding.step` state
+itself still progresses correctly regardless of which screen is active, this
+is a display-only scope reduction. A small "Skip Guide" text link sits in
+the banner's own top-right corner (`Game.skipOnboarding()`). Separately,
+`ui/BottomNav.ts` layers three pieces onto the BREED tab for exactly as long
+as `onboarding.step === 'OPEN_BREED'` (`!dismissed`, checked every
+`refresh()`): the original subtle, non-flashing label alpha-yoyo pulse
+(`0.45 ↔ 1.0`, 550ms — kept, see PROJECT.md's "obnoxious flashing"
+exclusion, which this still respects) plus two much stronger additions from
+human playtest feedback that the pulse alone was too easy to miss — a solid
+4px **white ring** stroked around the whole tab (`breedRingGfx`, drawn once
+at construction, toggled by `setVisible`, never touching the tab's existing
+interactive `zone`/hitbox) and a small bobbing **pointing-hand chevron**
+(`breedPointer`, a minimal Phaser `Graphics` triangle rather than a Unicode
+glyph, per this feature's own "draw a shape if a glyph would be unreliable"
+guidance) hovering just above the tab, alpha-yoyo-free but position-bobbing
+8px via a plain up/down tween. All three stop the instant the condition
+goes false — BREED opened (onboarding advances past `OPEN_BREED`), guide
+skipped, or onboarding already complete — and none permanently alter the
+tab's normal styling once that happens.
+
+**Market discoverability hint** (`GameState.marketHintShown`, never resets):
+deliberately NOT part of the onboarding chain above (it fires after/around
+onboarding completion, never before Breed). Shown at most once ever, from
+whichever of two trigger points happens first — right after
+`'onboardingComplete'` (with a short delay so the two toasts, which don't
+stack/queue in this codebase's `ToastQueue`, don't visually overlap) or the
+next `'dayAdvanced'` event (fired at the end of every day transition) if
+onboarding hasn't completed yet — both funnel through
+`MainScene.maybeShowMarketHint()`, itself guarded by
+`Game.markMarketHintShown()`'s own idempotency. Never force-opens Market,
+never redesigns it.
+
+**Save migration** (`systems/save.ts`): a save with no `onboarding` field at
+all infers a reasonable starting point from existing save data rather than
+always restarting an experienced player's guide from step 1 — `step`
+defaults to `COMPLETE` (and `marketHintShown` to `true`) if the save has
+ever bred (`breeding.everBredOnce`) or owns more than the two starter Lines;
+otherwise it starts fresh at `HARVEST_APPLE`. An existing valid
+`onboarding` object (a save already written by this pass) is validated,
+never reinferred; an invalid/corrupt `step` value falls back safely to
+`HARVEST_APPLE`. `resetPrototype()` returns onboarding to the exact fresh
+start (it just rebuilds the whole initial state, no special-casing needed).
+
+## Pre-Closing warning, 18:00 Closing cue, and Day transition fade
+
+**Implemented.** Playtesting also found the sudden jump to automatic 18:00
+collection surprising, and the flat day-to-day transition unsatisfying.
+None of this changes Closing's own capacity-aware collection rules, the
+Freshness formula, Operating Cost, or Shipping Speed — purely presentation
+and heads-up timing layered on top.
+
+**Pre-Closing warning** (`GameState.closingWarningShown`, reset every day in
+`Game.advanceDayInternal()`): fires once, from inside `Game.update()`'s
+existing day-clock block, keyed off the digital clock via
+`systems/clock.ts` `dayTimeRemainingAtClock(hour, minute)` (the exact
+inverse of `gameClockLabel`) rather than a second, independently tuned
+real-time duration — `TUNING.CLOSING_WARNING_CLOCK` (17:00, one hour before
+automatic 18:00 Closing). Revised from the original two-warning table
+(17:30 + 17:50, two persisted flags) after human playtesting found two
+separate warnings unnecessary — one clean flag replaces both, with no dead
+duplicate state left behind. Emits a `'closingWarning'` event (no payload —
+there's only the one warning now); `MainScene` shows a compact, non-blocking
+"CLOSING SOON · 1 HOUR" toast via the existing `ToastQueue` plus a short
+procedural audio cue (see below). The check lives inside the
+`if (this.state.dayActive)` block, so a manual END DAY that closes the day
+before the threshold is reached can never fire it afterward — `dayActive`
+is already false by then and the block simply stops running. **Save
+migration**: a save written under the old two-flag system with either old
+flag already `true` migrates `closingWarningShown` to `true` too (17:00 is
+strictly earlier than both retired thresholds, so the player was already
+past it); a save with neither, or with no legacy flags at all, migrates to
+`false` (see `systems/save.ts` `migrateState`).
+
+**18:00 Closing cue** (`GameEvent` `'closingBegan'`, `{ automatic: boolean
+}`): `Game.beginClosing(automatic = false)` now takes an explicit flag —
+the 18:00 timer trigger inside `Game.update()` calls `beginClosing(true)`,
+a manual END DAY click (`MainScene.onEndDay()`) calls the zero-arg default
+(`false`) — and emits `'closingBegan'` immediately, before its existing
+collection sequence runs. `MainScene` shows a short centered "CLOSING /
+Final collection" overlay (`showClosingCue()`, ~850ms total: 150ms in, 500ms
+hold, 200ms out — inside the approved 0.5-1.0s range) only when
+`automatic === true`, since a manual END DAY click already gives the player
+immediate button feedback. Closing's own collection sequence is never
+delayed by this — it proceeds normally underneath the overlay.
+
+**Day transition fade** (`MainScene.runDayTransition()`): the End Day
+summary modal's "NEXT DAY →" (and Day 7's "CONTINUE →") button now goes
+through this instead of calling `proceedToNextDay()` directly. Sequence:
+disable repeated activation (`dayTransitionInProgress` guard) → manual
+full-screen black overlay fades in (300ms) → while black: `showScreen('ORCHARD')`
+(closes any transient screen-specific UI, e.g. BreedScreen's own rename DOM
+input, via its existing `setVisible(false)` teardown, and returns the active
+screen to ORCHARD) → run the actual day-advance (`proceedToNextDay()`) →
+`refreshAll()` → a centered **"DAY N"** label (using the actual
+newly-advanced `GameState.day`, never "DAY COMPLETE" — this is the start of
+the new day) appears over the black screen and holds for 600ms → the label
+and overlay fade back out together (400ms) → the next-day audio cue plays →
+once that fade-out completes, run `after()` (e.g. opening the Week Summary
+modal on Day 7, deliberately shown AFTER the transition settles rather than
+during the black window). Total transition ≈1.3s, inside the ~1-1.5s target
+— short and clean, not cinematic. Deliberately uses a manual full-screen
+`Rectangle` + `Text` (both tweened directly, the same pattern
+`showClosingCue()` already used) rather than `cameras.main.fadeOut/fadeIn`:
+Phaser's camera Fade FX is a post-render effect drawn on top of everything
+that camera renders, so a Game Object added at any depth during a camera
+fade would still be invisible behind it — there'd be no way to show the DAY
+N label while the screen reads as black using the camera FX alone. This is
+a **UI/navigation reset only** — no Lines, Specimens, Market state, or Breed
+progress are touched; if a Breed operation is in-flight, it's simply not
+the visible screen anymore, its own state is untouched. `MainScene.create()`
+still does its own short entrance `cameras.main.fadeIn` (400ms, no DAY-N
+label) when first entering the playable game — kept as the simpler existing
+camera-fade approach rather than folding it into the new helper, since it
+has no day-advance/label to show.
+
+**Audio cues** (`systems/audio.ts`, new — no audio infrastructure existed in
+this codebase before this pass): the smallest possible Web Audio solution
+for exactly three short, gentle procedural sine-tone cues (pre-Closing
+warning, Closing begins, next day begins) — NOT ambient BGM, NOT a harvest
+SFX library, NOT external/downloaded assets (those remain explicit future
+polish, see "Open playtest findings" below). Exactly one `AudioContext` is
+ever lazily created; every `play*()` call is a no-op until
+`unlockAudio()` has been called from a genuine user gesture
+(`MainScene` wires this to the scene's first-and-every `pointerdown`, per
+browser autoplay policy — `unlockAudio()` itself is idempotent once it
+succeeds) and gracefully no-ops on any failure (no Web Audio support,
+context creation/resume failure) rather than throwing.
+
+**Serialized transient notifications** (`ui/modals.ts` `ToastQueue`): every
+screen shares one `ToastQueue` instance (constructed once in
+`MainScene.create()` and passed to `OrchardScreen`/`BreedScreen`/
+`CalendarScreen`), so it's the single presentation layer every toast-style
+message already went through — breeding-ready, trait-discovered,
+specimen-acquired, packing-full, the Pre-Closing warning, onboarding-
+complete, the Market hint, field-purchase, and contest-result toasts alike.
+Browser playtesting found some of these could fire close enough together to
+visually overlap at the same on-screen slot. Fixed with one small internal
+FIFO array (`QueuedToast[]`) rather than solving each pair individually:
+`show()` now pushes onto the queue and only starts presenting immediately if
+nothing is already showing; each toast's existing fade-in/hold/fade-out
+sequence is unchanged, but its fade-out's `onComplete` now calls
+`presentNext()` instead of just destroying itself, so the next queued toast
+(if any) only begins its own entrance once the current one has fully
+finished — never overlapping, trigger order always preserved, nothing
+silently dropped. The one-time Market hint's old workaround (a manual
+2400ms `delayedCall` after the onboarding-complete toast, specifically to
+avoid the two overlapping before this queue existed) was removed as
+redundant — `maybeShowMarketHint()` is now called immediately, and the
+shared queue naturally serializes it behind whatever's already showing. The
+persistent onboarding objective banner (`OnboardingBanner`) and the BREED
+nav-tab callout are NOT toasts and don't go through this queue — they're
+always-visible/state-driven overlays, not transient messages, so they were
+never a source of the overlap this fixes.
+
+Verification: `scripts/verify-onboarding.ts` — onboarding's forward-only
+state machine (including the Specimen-first skip-ahead case and the
+never-regresses guarantee), SKIP GUIDE, save/reload persistence, Day 2 not
+restarting Day 1 progress, `resetPrototype()` restoring the start, no extra
+Specimen generation, the Market hint's single-fire guarantee, the
+Pre-Closing warning (fire-once, reset-next-day, no reload replay, no
+post-manual-END-DAY firing, legacy two-flag save migration), `'closingBegan'`'s
+automatic/manual distinction, and the revised Packing Capacity table;
+re-run alongside `verify-market.ts`, `verify-market-display.ts`,
+`verify-specimens.ts`, `verify-shipping-infrastructure.ts` (updated for the
+new capacity table — see "Shipping Infrastructure" above), and
+`verify-freshness.ts` (likewise updated), all still green. The objective
+banner's exact on-screen layout, the BREED nav-tab's white-ring/pointing-hand
+callout and label pulse, the Closing-cue overlay, the day-transition black
+screen and its "DAY N" label, the serialized `ToastQueue`'s actual on-screen
+non-overlap, and the three audio cues are Phaser-rendered/browser-only
+concerns not exercised by that Node script — see the implementation report
+for what still needs human browser verification.
+
 ## Orchard
 
 - Up to 4 Fields, one variety each, selected via horizontal tabs (`+ FIELD`
@@ -151,8 +379,13 @@ Shipment silently erasing any bottleneck for free. See `Game.ts`
 `TUNING.SHIPPING_SPEED_LEVELS` for the exact tables.
 
 **Packing Capacity** (`GameState.packingCapacityLevel`, 1-5, default 1):
-the maximum length `processingQueue` may hold — 12/18/24/32/40 apples at
-Levels 1-5, upgrade cost $150/$350/$700/$1200 (Lv1->2 through Lv4->5).
+the maximum length `processingQueue` may hold — 18/24/32/40/50 apples at
+Levels 1-5, upgrade cost $100/$225/$450/$850 (Lv1->2 through Lv4->5). Revised
+from the original 12/18/24/32/40 · $150/$350/$700/$1200 table (see
+"First-session onboarding" below) — human playtesting found the original
+Level 1 (12) too restrictive and the early upgrade costs too steep for a
+new player's first session. Only these tuning numbers changed; every
+mechanic described below is unchanged.
 `Game.harvestFruitSlot` checks `processingQueue.length >= packingCapacity()`
 **before** any mutation — a normal ripe apple hitting a full Packing Box is
 a pure no-op: it stays ripe on its exact slot (no slot rotation, no queue
@@ -692,6 +925,32 @@ become a permanent Owned Line. Three distinct states now exist:
 - **OWNED LINE** — unchanged: a permanent Library Line, normally created
   by KEEPing offspring.
 
+**DISCOVERED != OWNED applies to Color/Pattern too, not just visualId**
+(`ui/CollectionScreen.ts`'s TRAITS tab): a genetic Color (e.g. Purple) or
+Pattern (e.g. Striped) registers as DISCOVERED the instant it's shown on
+ANY of the four Breed candidates — including the Day-1 guaranteed Yellow
+opportunity and the Day-5 guaranteed Purple-or-Striped candidate (see
+"Breeding" below) — regardless of whether that particular candidate is ever
+KEPT (`systems/breeding.ts` `breedOffspring`'s `newlyDiscoveredColors`/
+`newlyDiscoveredPatterns`, folded into `GameState.discoveredColors`/
+`discoveredPatterns` by `Game.resolveBreeding()`). This is intentional and
+unchanged — the same "a Visual shown as a candidate becomes DISCOVERED"
+rule the visualId system above already uses. What was a bug was the
+TRAITS tab's presentation: it used to show the same ✓ check mark for
+"DISCOVERED" that the rest of this document (and MarketScreen's own
+OWNED/DISCOVERED ONLY badge) reserves for OWNED, so a Color/Pattern seen
+only as an un-kept candidate (e.g. the Day-5 guarantee firing on a
+candidate the player didn't choose) could show a check mark the player
+reasonably read as "I have this," despite no Library Line actually
+carrying it. Fixed as a presentation-only change — the check mark now
+unmistakably means OWNED (a kept Library Line currently has this Color/
+Pattern, derived live from `GameState.library` every render, exactly like
+`Game.isVisualIdOwned()` derives Visual ownership — never a second
+persisted array/flag); DISCOVERED-but-not-OWNED shows a distinct "SEEN"
+label instead of the check; UNDISCOVERED keeps its existing `?` treatment.
+No discovery rule, Breed candidate generation, or the Day-1/Day-5
+guarantees themselves changed at all.
+
 Every Line and Specimen also carries a **`baseVisualId`** alongside its
 identity `visualId` (see "Stable Common baseVisual / Mutation Affinity"
 below) — `visualId` is what it *is* (its special lineage/identity, shown
@@ -1076,8 +1335,8 @@ freshly discovered variety initializes.
 - Irrigation: $250 then $700, −12% fruit-slot regrow time per level, max 2.
 - Shipping (sale-value bonus): $400 then $1000, +10% sale value per level,
   max 2 — distinct from the Shipping *Speed* logistics upgrade below.
-- Packing Capacity (see "Shipping Infrastructure"): $150/$350/$700/$1200 for
-  Levels 2-5 (12/18/24/32/40 apples), max 5.
+- Packing Capacity (see "Shipping Infrastructure"): $100/$225/$450/$850 for
+  Levels 2-5 (18/24/32/40/50 apples), max 5.
 - Shipping Speed (see "Shipping Infrastructure"): $200/$450/$900/$1600 for
   Levels 2-5 (1.00/0.80/0.65/0.52/0.42 sec/apple), max 5.
 - No upgrade ever raises genetic Sweetness/Size/Yield directly — that's
@@ -1387,18 +1646,88 @@ the current baseline-relative `+X%` with a separate `Today ±Npt` daily-
 movement line. See Market V1's "Graph clarity pass" subsection above and
 `systems/marketDisplay.ts`/`scripts/verify-market-display.ts`.
 
+### First-session onboarding, Pre-Closing warning/Closing cue/Day transition
+fade, Packing retune — IMPLEMENTED
+
+See "First-session onboarding" and "Pre-Closing warning, 18:00 Closing cue,
+and Day transition fade" earlier in this file for the full mechanics, and
+"Shipping Infrastructure" above for the revised Packing Capacity table
+(18/24/32/40/50, $100/$225/$450/$850). Driven by the same human playtest
+that flagged the harvest→breed disconnect this file's earlier "Mutation-
+fruit discovery" paragraph already describes — this pass specifically
+targeted "a new player may harvest for 10-20 seconds, never realize the game
+is about breeding, and quit."
+
+### Open playtest findings — deliberately deferred, not implemented
+
+The same human playtest (see "First-session onboarding" above) surfaced
+several further issues, judged important but out of scope for that pass.
+Recorded here so intent isn't lost before each is actually decided/built —
+do not build ahead of the priority order below.
+
+- **Sweetness vs. Size**: both stats currently mostly do the same thing
+  (increase apple value) — the distinction between them is weak. Needs a
+  future differentiation pass. Breed math/formula untouched for now.
+- **Cultivation** (NORMAL / SWEETEN / GROW_BIG): rarely used in practice and
+  its purpose isn't obviously communicated. Needs a decision — strengthen
+  it, redesign it, fold it into onboarding later, or simplify/remove it.
+  Unchanged for now.
+- **Breed candidate TOTAL variation**: all four A/B/C/D candidates
+  currently share the exact same shared TOTAL target (see "Breeding"
+  above's TOTAL progression subsection) — a future balance pass could allow
+  modest candidate-to-candidate TOTAL variation while still guaranteeing
+  genetic progress, so players choose by highest TOTAL, preferred stat
+  distribution, desired Visual, or lineage strategy instead of the four
+  candidates being TOTAL-interchangeable. Breed math unchanged for now.
+- **Rare/Epic odds visibility**: players want an Orchard button/detail view
+  showing the current probability of which Rare/Epic mutation Visuals can
+  appear on the currently planted farm, including Mutation Affinity. Not
+  implemented.
+- **Contest**: the Day 4 Sweetness Contest / Day 7 Apple Fair presentation
+  exists but the underlying gameplay loop isn't meaningfully developed.
+  Needs an explicit KEEP / expand / remove decision rather than being left
+  as a half-finished feature indefinitely.
+- **Calendar**: limited functional value today beyond the week strip.
+  Possible future direction is a more genuinely calendar-like grid view, but
+  readability needs evaluating first. Not redesigned in this pass.
+- **Collection**: presentation is too passive/plain — needs a future
+  Collection / Library / Replant cleanup pass with stronger visual
+  motivation (see "Revised priority order" below, already tracked there).
+- **Orchard presentation**: bottom/tree controls need consolidation, the
+  rear two trees should eventually match the front trees' apparent visual
+  scale, and the Orchard needs a stronger final visual composition overall
+  — all deferred to the "Orchard / global UI redesign" entry above.
+- **Audio/atmosphere**: harvest SFX, wind/orchard ambience, calm BGM,
+  subtle tree/fruit sway, and richer day-start/day-end sound are all
+  explicitly desired future polish. The three tiny procedural cues added in
+  this pass (see "Pre-Closing warning, 18:00 Closing cue, and Day transition
+  fade" above) are functional heads-up cues only — they do NOT count as
+  this future audio polish pass.
+- **Discoverability**: Market and other supporting systems remain easy to
+  overlook beyond this pass's single one-time hint (see "First-session
+  onboarding" above). A future global UI redesign needs to establish
+  stronger visual hierarchy/discoverability generally, not just for Market.
+
 ### Revised priority order
 
 Shipping Pipeline, Day Cycle, Daily Operating Cost, Market V1 (incl. its
 graph clarity pass), Orchard Mutation / Breeding Specimen, Shipping
-Infrastructure V1 (Packing Capacity / Shipping Speed), and Freshness V1 are
-done (see their sections above) — remaining order:
+Infrastructure V1 (Packing Capacity / Shipping Speed), Freshness V1, and
+First-session onboarding / Pre-Closing warning / Closing cue / Day
+transition fade / Packing retune are done (see their sections above) —
+remaining order:
 
-1. Week 1 / Week 2 full core-loop playtest and balance pass
-2. Orchard / global UI redesign
-3. Collection / Library / Replant cleanup
-4. Final art / animation / sound / font polish
-5. Release pass
+1. Human first-session + Week 1/Week 2 playtest (validating this pass)
+2. Balance decisions from that playtest — Sweetness vs. Size, Cultivation,
+   Breed TOTAL variation, Packing/Freshness tuning, Contest keep/cut
+   decision (see "Open playtest findings" above for each)
+3. Orchard / global UI redesign
+4. Collection / Library / Replant cleanup
+5. Atmosphere / animation / audio polish
+6. Release pass
+
+Do not promote any of the "Open playtest findings" items ahead of this
+order automatically before that next playtest actually happens.
 
 Freshness V1 deliberately connects Breeding → Freshness → Packing Capacity →
 Shipping Speed → Money without touching any existing Shipping Infrastructure

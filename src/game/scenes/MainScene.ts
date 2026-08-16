@@ -11,10 +11,26 @@ import { ToastQueue } from '../ui/modals.ts';
 import { showEndDaySummary } from '../ui/EndDayModal.ts';
 import { showWeekSummary } from '../ui/WeekSummaryModal.ts';
 import { DebugPanel } from '../ui/DebugPanel.ts';
+import { OnboardingBanner } from '../ui/OnboardingBanner.ts';
 import { APPLE_ASSET_IDS, appleAssetPath, appleTextureKey, catalogLabel } from '../render/appleAssets.ts';
+import { playClosingBeginsCue, playNextDayBeginsCue, playPreClosingWarningCue, unlockAudio } from '../systems/audio.ts';
 import type { DayLogEntry } from '../types.ts';
 
 const REFRESH_INTERVAL_MS = 120;
+
+// Day-transition fade (see PROJECT.md "Day transition fade") — kept brief
+// per the explicit target range, never several real seconds. Total transition
+// (fade out + DAY N hold + fade in) stays inside the ~1-1.5s target.
+const DAY_FADE_OUT_MS = 300;
+const DAY_LABEL_HOLD_MS = 600;
+const DAY_FADE_IN_MS = 400;
+
+// 18:00 Closing cue (see PROJECT.md "18:00 Closing cue") — total on-screen
+// time stays inside the explicit 0.5-1.0s target (150ms in + 500ms hold +
+// 200ms out = 850ms).
+const CLOSING_CUE_IN_MS = 150;
+const CLOSING_CUE_HOLD_MS = 500;
+const CLOSING_CUE_OUT_MS = 200;
 
 export class MainScene extends Phaser.Scene {
   private logic!: Game;
@@ -25,10 +41,15 @@ export class MainScene extends Phaser.Scene {
   private breed!: BreedScreen;
   private calendar!: CalendarScreen;
   private collection!: CollectionScreen;
+  private onboardingBanner!: OnboardingBanner;
   private activeScreen: ScreenId = 'ORCHARD';
   private refreshAccum = 0;
   private speedMult = 1;
   private weekModalShown = false;
+  // Guards against a double NEXT DAY activation (see PROJECT.md "Day
+  // transition fade" section 9) while the fade-out/advance/fade-in sequence
+  // is in flight.
+  private dayTransitionInProgress = false;
   // Throttles the "PACKING FULL" toast (see PROJECT.md "Shipping
   // Infrastructure" section 5) — a hold-and-sweep drag over several
   // blocked ripe apples, or a single HARVEST ALL click blocked on many
@@ -71,6 +92,7 @@ export class MainScene extends Phaser.Scene {
 
     this.hud = new HUD(this, this.logic, () => this.onEndDay());
     this.nav = new BottomNav(this, this.logic, (id) => this.showScreen(id));
+    this.onboardingBanner = new OnboardingBanner(this, this.logic, () => this.activeScreen);
 
     // DebugPanel added last so it renders/hits above nav.
     new DebugPanel(
@@ -79,6 +101,12 @@ export class MainScene extends Phaser.Scene {
       () => this.speedMult,
       (m) => (this.speedMult = m),
     );
+
+    // Unlocks the tiny procedural audio cues (see systems/audio.ts) on the
+    // first genuine user gesture, per browser autoplay policy — safe/cheap
+    // to leave attached for the whole scene lifetime since unlockAudio()
+    // itself is idempotent once it succeeds.
+    this.input.on('pointerdown', () => unlockAudio());
 
     this.logic.on((event) => {
       if (event.type === 'breedingReady' && this.activeScreen !== 'BREED') {
@@ -105,10 +133,43 @@ export class MainScene extends Phaser.Scene {
       if (event.type === 'dayClosed' && this.logic.state.lastDayLog) {
         this.showEndDayFlow(this.logic.state.lastDayLog);
       }
+      // Pre-Closing warning (see PROJECT.md "Pre-Closing warning") — a
+      // single compact, non-blocking toast at 17:00 plus a short audio cue;
+      // the toast queue itself already handles fade in/out, auto-dismissal,
+      // and serializing against any other toast in flight.
+      if (event.type === 'closingWarning') {
+        playPreClosingWarningCue();
+        this.toasts.show('CLOSING SOON · 1 HOUR', THEME.gold);
+      }
+      // 18:00 Closing cue (see PROJECT.md "18:00 Closing cue") — only for
+      // the automatic 18:00 trigger; a manual END DAY click already gives
+      // the player immediate button feedback and doesn't need this.
+      if (event.type === 'closingBegan' && event.automatic) {
+        playClosingBeginsCue();
+        this.showClosingCue();
+      }
+      // First-session onboarding completion (see PROJECT.md "First-session
+      // onboarding" section 6) — a short toast, then the one-time Market
+      // hint if it hasn't already fired from a day transition. The two
+      // never visually overlap since both go through the same serialized
+      // ToastQueue (see ui/modals.ts) — no artificial delay needed.
+      if (event.type === 'onboardingComplete') {
+        this.toasts.show('NEW LINE CREATED — Breed again to improve stats, specialize traits, or preserve a visual lineage.', THEME.gold);
+        this.maybeShowMarketHint();
+      }
+      // Fallback Market-hint trigger (see PROJECT.md "Market discoverability")
+      // — fires on every day transition, but maybeShowMarketHint() itself is
+      // guarded by state.marketHintShown so it only ever actually shows once.
+      if (event.type === 'dayAdvanced') {
+        this.maybeShowMarketHint();
+      }
     });
 
     this.showScreen('ORCHARD');
     this.refreshAll();
+    // Short entrance fade (see PROJECT.md "Day transition fade" — "use a
+    // short fade-in when initially entering the playable game").
+    this.cameras.main.fadeIn(DAY_FADE_IN_MS, 0, 0, 0);
 
     // Root-cause fix for the "stuck on Day N, END DAY disabled forever"
     // bug: `dayEnded`/`weekComplete` are persisted GameState, but the
@@ -168,12 +229,17 @@ export class MainScene extends Phaser.Scene {
     this.calendar.setVisible(id === 'CALENDAR');
     this.collection.setVisible(id === 'COLLECTION');
     this.nav.selectTab(id);
+    // Onboarding step C completion (see PROJECT.md "First-session
+    // onboarding" section 3) — a no-op unless the player's current goal is
+    // exactly OPEN_BREED.
+    if (id === 'BREED') this.logic.onboardingBreedScreenOpened();
     this.refreshAll();
   }
 
   private refreshAll(): void {
     this.hud.refresh();
     this.nav.refresh();
+    this.onboardingBanner.refresh();
     if (this.activeScreen === 'ORCHARD') this.orchard.render();
     else if (this.activeScreen === 'BREED') this.breed.render();
     else if (this.activeScreen === 'CALENDAR') this.calendar.render();
@@ -196,12 +262,125 @@ export class MainScene extends Phaser.Scene {
   private showEndDayFlow(log: DayLogEntry): void {
     const isLastDay = this.logic.state.day >= 7;
     showEndDaySummary(this, log, isLastDay, () => {
-      this.logic.proceedToNextDay();
-      this.refreshAll();
-      if (this.logic.state.weekComplete && !this.weekModalShown) {
-        this.showWeekSummaryFlow();
-      }
+      // Day transition fade (see PROJECT.md "Day transition fade" section
+      // 9) wraps the actual day-advance; the Week Summary modal (if this
+      // was Day 7) is deliberately shown AFTER the fade-in completes,
+      // rather than during the black window, so it appears over a settled,
+      // already-reset Orchard screen instead of stacking mid-transition.
+      this.runDayTransition(
+        () => this.logic.proceedToNextDay(),
+        () => {
+          if (this.logic.state.weekComplete && !this.weekModalShown) {
+            this.showWeekSummaryFlow();
+          }
+        },
+      );
     });
+  }
+
+  // Fade out -> (while black) close transient UI, return to ORCHARD, run
+  // `advance` -> show the newly-advanced "DAY N" label over black, held
+  // briefly -> fade back in -> play the day-start cue -> `after`. Guards
+  // against a double NEXT DAY activation via dayTransitionInProgress (see
+  // PROJECT.md "Day transition fade").
+  //
+  // Uses a manual full-screen overlay + Text (not cameras.main.fadeOut/
+  // fadeIn) specifically so the DAY N label can be shown while the screen
+  // reads as fully black: Phaser's camera Fade FX is a post-render effect
+  // applied on top of everything that camera draws, so a Game Object added
+  // at any depth would still be hidden behind it. The overlay's own alpha
+  // tween gives the exact same visual fade as the camera FX did.
+  private runDayTransition(advance: () => void, after?: () => void): void {
+    if (this.dayTransitionInProgress) return;
+    this.dayTransitionInProgress = true;
+
+    const overlay = this.add.rectangle(LAYOUT.width / 2, LAYOUT.height / 2, LAYOUT.width, LAYOUT.height, 0x000000, 1).setDepth(3000).setAlpha(0);
+    const dayLabel = this.add
+      .text(LAYOUT.width / 2, LAYOUT.height / 2, '', { fontFamily: THEME.font, fontSize: '72px', color: THEME.textGold, fontStyle: 'bold' })
+      .setOrigin(0.5)
+      .setDepth(3001)
+      .setAlpha(0);
+
+    this.tweens.add({
+      targets: overlay,
+      alpha: 1,
+      duration: DAY_FADE_OUT_MS,
+      onComplete: () => {
+        // Returning to ORCHARD also closes BreedScreen's own transient UI
+        // (e.g. a stray rename DOM input — see BreedScreen.setVisible) since
+        // it's no longer the visible screen. This is a UI/navigation reset
+        // only — no genetics/Line/Specimen/Market state is touched here (see
+        // PROJECT.md "Reset UI position at a new day").
+        this.showScreen('ORCHARD');
+        advance();
+        this.refreshAll();
+
+        // Uses the actual newly-advanced GameState day value — advance()
+        // (proceedToNextDay/startNextWeek) has already run by this point.
+        dayLabel.setText(`DAY ${this.logic.state.day}`);
+        dayLabel.setAlpha(1);
+
+        this.time.delayedCall(DAY_LABEL_HOLD_MS, () => {
+          playNextDayBeginsCue();
+          this.tweens.add({
+            targets: [overlay, dayLabel],
+            alpha: 0,
+            duration: DAY_FADE_IN_MS,
+            onComplete: () => {
+              overlay.destroy();
+              dayLabel.destroy();
+              this.dayTransitionInProgress = false;
+              after?.();
+            },
+          });
+        });
+      },
+    });
+  }
+
+  // 18:00 Closing cue (see PROJECT.md "18:00 Closing cue") — a short
+  // centered presentation, entirely separate from the day-transition fade
+  // above (Closing itself is not delayed by this; it's a purely visual
+  // overlay while the existing capacity-aware collection proceeds
+  // underneath it).
+  private showClosingCue(): void {
+    const cx = LAYOUT.width / 2;
+    const cy = LAYOUT.height / 2;
+    const container = this.add.container(cx, cy);
+    container.setDepth(2500);
+
+    const bg = this.add.rectangle(0, 0, 460, 150, 0x1c1c14, 0.85).setOrigin(0.5);
+    const title = this.add
+      .text(0, -20, 'CLOSING', { fontFamily: THEME.font, fontSize: '44px', color: THEME.textGold, fontStyle: 'bold' })
+      .setOrigin(0.5);
+    const subtitle = this.add.text(0, 32, 'Final collection', { fontFamily: THEME.font, fontSize: '22px', color: THEME.textLight }).setOrigin(0.5);
+    container.add([bg, title, subtitle]);
+    container.setAlpha(0);
+
+    this.tweens.add({
+      targets: container,
+      alpha: 1,
+      duration: CLOSING_CUE_IN_MS,
+      onComplete: () => {
+        this.time.delayedCall(CLOSING_CUE_HOLD_MS, () => {
+          this.tweens.add({
+            targets: container,
+            alpha: 0,
+            duration: CLOSING_CUE_OUT_MS,
+            onComplete: () => container.destroy(),
+          });
+        });
+      },
+    });
+  }
+
+  // One-time-ever Market discoverability hint (see PROJECT.md "Market
+  // discoverability") — safe to call from multiple trigger points since
+  // markMarketHintShown() on Game is itself idempotent/guarded.
+  private maybeShowMarketHint(): void {
+    if (this.logic.state.marketHintShown) return;
+    this.logic.markMarketHintShown();
+    this.toasts.show('TIP: Market prices change each day. Click the Market headline to see discovered varieties.', THEME.info);
   }
 
   private showWeekSummaryFlow(): void {

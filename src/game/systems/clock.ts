@@ -15,3 +15,17 @@ export function gameClockLabel(dayTimeRemaining: number): string {
   const minutes = totalMinutes % 60;
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 }
+
+/**
+ * The exact `dayTimeRemaining` value at which the digital clock above reads
+ * `hour:minute` — the inverse of `gameClockLabel`. Used to derive the
+ * Pre-Closing warning thresholds (see PROJECT.md "Pre-Closing warning") from
+ * the existing digital clock mapping rather than a second, independently
+ * tuned real-time duration.
+ */
+export function dayTimeRemainingAtClock(hour: number, minute: number): number {
+  const spanMinutes = (TUNING.DAY_END_HOUR - TUNING.DAY_START_HOUR) * 60;
+  const targetMinutes = hour * 60 + minute;
+  const elapsedFraction = (targetMinutes - TUNING.DAY_START_HOUR * 60) / spanMinutes;
+  return Math.max(0, (1 - elapsedFraction) * TUNING.DAY_DURATION_SEC);
+}
