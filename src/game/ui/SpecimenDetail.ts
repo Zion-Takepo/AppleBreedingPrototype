@@ -61,10 +61,20 @@ export function renderSpecimenDetail(
 
   if (opts.pairingWithLabel) {
     container.add(mkText(scene, textX, metaY, opts.pairingWithLabel, 20, '#3b6db2', true));
+    metaY += 28;
   }
 
-  const radarY = y + appleSizePx + 130;
-  const radar = new RadarChart(scene, x + w * 0.28, radarY, 108, true);
+  // The radar's own top axis label (RadarChart's showLabels, radiusFrac
+  // 1.32) sits ~radius*1.32 above radarY, plus its own text height — so
+  // radarY can't be a fixed offset from the apple alone, or it collides
+  // with the archetype/FOCUS/pairing lines above whenever those add extra
+  // height (the ELITE/TRAIT OUTLIER + FOCUS case). One shared clearance
+  // constant keeps every specimen variant (with/without archetype, with/
+  // without FOCUS, with/without pairing label) on the same layout path.
+  const radarRadius = 108;
+  const radarTopLabelClearance = radarRadius * 1.32 + 26;
+  const radarY = Math.max(y + appleSizePx + 130, metaY + radarTopLabelClearance);
+  const radar = new RadarChart(scene, x + w * 0.28, radarY, radarRadius, true);
   radar.setValues(specimen);
   container.add(radar);
 
