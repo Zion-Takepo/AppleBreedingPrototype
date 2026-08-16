@@ -21,6 +21,15 @@ import { openShippingInfraModal } from './ShippingInfraModal.ts';
 // is presentation-only.
 // ------------------------------------------------------------------
 
+// Orchard Background V1 (see PROJECT.md "Orchard Background V1") — the
+// single approved external painterly background, used exactly as supplied
+// (no tinting/blurring/derivative processing). Exported so MainScene can
+// load it under the same key/path this screen displays it with — the same
+// pattern APPLE_ASSET_IDS/appleTextureKey/appleAssetPath already use for
+// the apple illustrations.
+export const ORCHARD_BACKGROUND_KEY = 'orchard-background';
+export const ORCHARD_BACKGROUND_PATH = 'assets/orchard/orchard_background.png';
+
 // Field card (top-left) — a small secondary label plus a compact
 // deep-forest pill (current Line + dropdown) and a separate cream/gold
 // "+ FIELD" button beside it, rather than one large cream panel.
@@ -93,6 +102,7 @@ function drawStatIcon(g: Phaser.GameObjects.Graphics, key: StatKey, cx: number, 
 export class OrchardScreen extends Phaser.GameObjects.Container {
   private game: Game;
   private toasts: ToastQueue;
+  private background: Phaser.GameObjects.Image;
   private treeLayer: OrchardTreeLayer;
   private fieldCard: Phaser.GameObjects.Container;
   private fieldDropdown: Phaser.GameObjects.Container;
@@ -127,14 +137,31 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     // ('shipment' event, fired later from Game.update() once the apple
     // reaches the front of the shared farm-wide processing queue) is shown
     // next to the HUD cash card (see HUD.ts), not here.
+    // Orchard Background V1: the approved external painterly image, used
+    // exactly as supplied (see PROJECT.md "Orchard Background V1"). This
+    // Container itself sits at local y = -contentTop below, so the
+    // background needs the same negative offset to actually cover the full
+    // 1600x900 logical canvas rather than just the sub-HUD content area.
+    // setDisplaySize forces an exact 1600x900 fill — the source PNG
+    // (1672x941) is already authored at this aspect ratio to well under 1%
+    // tolerance, so this introduces no visible stretch. Never given
+    // setInteractive(), so it cannot capture pointer input or block
+    // fruit click/sweep. Scoped entirely to this Container (which is
+    // shown/hidden as a whole by MainScene.showScreen) rather than the
+    // global scene background, so it only ever appears on the ORCHARD
+    // screen — Breed/Calendar/Collection keep their own current look
+    // untouched.
+    this.background = scene.add.image(0, -LAYOUT.contentTop, ORCHARD_BACKGROUND_KEY).setOrigin(0, 0);
+    this.background.setDisplaySize(LAYOUT.width, LAYOUT.height);
+
     this.treeLayer = new OrchardTreeLayer(scene, game);
     this.fieldCard = scene.add.container(0, 0);
     this.mainView = scene.add.container(0, 0);
     this.fieldDropdown = scene.add.container(0, 0);
-    // Draw order: trees, then the field card, then the stats/action card
-    // content, then the field dropdown popup topmost (so it never renders
-    // underneath the card it opens from).
-    this.add([this.treeLayer, this.fieldCard, this.mainView, this.fieldDropdown]);
+    // Draw order: background, then trees, then the field card, then the
+    // stats/action card content, then the field dropdown popup topmost (so
+    // it never renders underneath the card it opens from).
+    this.add([this.background, this.treeLayer, this.fieldCard, this.mainView, this.fieldDropdown]);
     scene.add.existing(this);
   }
 

@@ -417,6 +417,24 @@ ORCHARD UI DIRECTION LOCKED:
 Do not mark final Orchard presentation complete — final art/audio passes
 remain.
 
+## Orchard Background V1
+
+**Implemented.** The approved external painterly Orchard background
+(`public/assets/orchard/orchard_background.png`) is now imported and
+displayed, used exactly as supplied — no tinting/blurring/derivative
+processing. Loaded once in `MainScene.preload()` under the shared
+`ORCHARD_BACKGROUND_KEY`/`ORCHARD_BACKGROUND_PATH` (exported from
+`ui/OrchardScreen.ts`) and drawn as the bottom-most layer inside
+`OrchardScreen`'s own Container, filling the full 1600x900 logical canvas,
+behind the five procedural trees/fruit and behind all Orchard UI — never
+interactive, so it cannot capture pointer input or block fruit
+click/sweep. Scoped to the ORCHARD screen only (it's part of
+`OrchardScreen`'s own Container, shown/hidden as a whole), so
+Breed/Calendar/Collection are unaffected. The five trees/apples remain a
+separate procedural layer on top of it — final tree/fruit art is still
+pending, and moving clouds/time-of-day atmosphere remain only a possible
+later enhancement, not part of this pass.
+
 ## Shipping Pipeline
 
 Harvesting (individual click/sweep or HARVEST ALL — both feed the identical
