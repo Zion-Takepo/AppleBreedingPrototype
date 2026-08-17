@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
-import type { Field, Variety } from '../types.ts';
+import type { Field, FieldFruitSlot, Variety } from '../types.ts';
 import { effectiveStats } from '../systems/economy.ts';
 import { AppleVisual } from './AppleVisual.ts';
 import { WindModel } from './orchardWind.ts';
@@ -88,12 +88,18 @@ interface TreeLayoutSlot {
 // left), TREE 3 1351->1363 (+12, further right). TREE 2 (front-middle) and
 // both back-row trees (TREE 4/TREE 5) `x` are untouched — this is
 // deliberately NOT a global front-row spread.
+// RETUNE 7 (canopy/fruit alignment + per-tree tuning pass): the new canopy
+// artwork has directional sunlight, so the two `flip: true` entries below
+// (back-right / TREE 5 / index 1, and center-front / TREE 2 / index 3) were
+// removed — flipping them now reads as contradictory lighting. All five
+// canopies use the source artwork's original orientation; no replacement
+// mirroring introduced.
 const TREE_LAYOUT: TreeLayoutSlot[] = [
-  { x: 499, groundY: 459, scale: 1.0, canopyOffsetY: -84, row: 'back' }, // TREE 4 (back-left)
-  { x: 1109, groundY: 456, scale: 1.0, canopyOffsetY: -83, flip: true, row: 'back' }, // TREE 5 (back-right)
-  { x: 243, groundY: 594, scale: 1.0, canopyOffsetY: -164, row: 'front' }, // TREE 1 (front-left)
-  { x: 808, groundY: 588, scale: 1.0, canopyOffsetY: -157, flip: true, row: 'front' }, // TREE 2 (front-middle)
-  { x: 1363, groundY: 593, scale: 1.0, canopyOffsetY: -106, row: 'front' }, // TREE 3 (front-right)
+  { x: 499, groundY: 459, scale: 1.0, canopyOffsetY: -84, row: 'back' }, // TREE 4 (back-left) — index 0
+  { x: 1109, groundY: 456, scale: 1.0, canopyOffsetY: -83, row: 'back' }, // TREE 5 (back-right) — index 1
+  { x: 243, groundY: 594, scale: 1.0, canopyOffsetY: -164, row: 'front' }, // TREE 1 (front-left) — index 2
+  { x: 808, groundY: 588, scale: 1.0, canopyOffsetY: -157, row: 'front' }, // TREE 2 (front-middle / center) — index 3
+  { x: 1363, groundY: 593, scale: 1.0, canopyOffsetY: -106, row: 'front' }, // TREE 3 (front-right) — index 4
 ];
 // 5 trees x 3 slots = 15, matching TUNING.FRUIT_PER_BATCH — decoupled by
 // design (this file is presentation-only), but the two must agree.
@@ -121,7 +127,12 @@ const CANOPY_SOURCE_H = 1086;
 // RETUNE 3 (human visual feedback: still slightly too dominant / too much
 // continuous canopy coverage). Another small pull-back, 350x263 -> 330x248
 // (~5.7% smaller), same aspect ratio, same shared-size mechanism.
-const CANOPY_DISPLAY_W = 330;
+// RETUNE 4 (canopy/fruit alignment + per-tree tuning pass): bumped back up
+// ~1.15x, 330x248 -> 380x285, same aspect ratio, same shared-size mechanism.
+// Fruit anchor spacing (canopyFruitOffsets) is derived from this constant,
+// so anchors scale naturally with the larger canopy — no separate change
+// needed there.
+const CANOPY_DISPLAY_W = 380;
 const CANOPY_DISPLAY_H = Math.round((CANOPY_DISPLAY_W * CANOPY_SOURCE_H) / CANOPY_SOURCE_W); // 248
 // Measured on the source art: the leaf mass's own bottom-center / top
 // extent as a fraction of image height (NOT 1.0/0.0 — there's transparent
@@ -130,6 +141,22 @@ const CANOPY_DISPLAY_H = Math.round((CANOPY_DISPLAY_W * CANOPY_SOURCE_H) / CANOP
 const CANOPY_ANCHOR_FRAC = 977 / 1086;
 const CANOPY_TOP_FRAC = 39 / 1086;
 const CANOPY_CONTENT_H = CANOPY_DISPLAY_H * (CANOPY_ANCHOR_FRAC - CANOPY_TOP_FRAC);
+// RETUNE (human visual feedback: canopy art reads slightly too vivid/bright
+// next to the background). A multiplicative vertex tint applied to the
+// canopy Image only — Phaser 4's per-object Filters/ColorMatrix system
+// (Camera.filters.addColorMatrix()) requires enableFilters() to allocate a
+// dedicated filter Camera + framebuffer per Game Object, which is real
+// per-object render overhead for what's just a static painterly PNG; a
+// plain tint is the smaller, WebGL-cheap, well-supported option and needs
+// no extra render passes. setTint() multiplies each texture channel by the
+// tint's own channel (255 = no change), never adds/blends toward gray, so
+// hue and alpha are preserved — only intensity per channel drops. Channels
+// are cut unevenly on purpose: G (the dominant channel in this green
+// foliage) drops the most (~11%) to pull it slightly toward R/B and soften
+// saturation, R drops the least (~6%) to keep the warm sunlight read, B
+// sits between the two (~8%) so it never reads as a blue/gray shift — net
+// ~8-9% average intensity reduction, subtle by design.
+const CANOPY_COLOR_TINT = 0xf0e3eb; // R 240/255 (-6%), G 227/255 (-11%), B 235/255 (-8%)
 // RETUNE (human visual feedback: foliage sat too high above the baked
 // trunks, reading as a separate "hat" rather than one connected tree). One
 // shared downward nudge applied on top of every tree's own per-trunk
@@ -181,6 +208,33 @@ const CANOPY_CONTENT_H = CANOPY_DISPLAY_H * (CANOPY_ANCHOR_FRAC - CANOPY_TOP_FRA
 const CANOPY_VERTICAL_NUDGE_FRONT_PX = 100;
 const CANOPY_VERTICAL_NUDGE_BACK_PX = 56;
 
+// Per-tree canopy tuning offsets — FIVE independent constants, one per
+// physical tree (replaces the old 3-group back/center/front sharing
+// system, which made it impossible to tune the far-right tree, TREE 3 /
+// index 4, without also moving TREE 1). Each is applied to BOTH the canopy
+// image's own local (x, y) AND that tree's fruit anchors (see
+// canopyFruitOffsets + TreeNode's constructor below), so canopy and apples
+// move together as one unit and hit areas stay centered on the visible
+// fruit — no separate canopy-only vs. fruit-only offset anymore. Start at
+// (0, 0) except CENTER, which preserves the previous center adjustment.
+const BACK_LEFT_CANOPY_OFFSET = { x: 50, y: -110 }; // TREE 4 (back-left) — index 0
+const BACK_RIGHT_CANOPY_OFFSET = { x: -60, y: -110 }; // TREE 5 (back-right) — index 1
+const FRONT_LEFT_CANOPY_OFFSET = { x: 50, y: -90 }; // TREE 1 (front-left) — index 2
+const CENTER_CANOPY_OFFSET = { x: -5, y: -75 }; // TREE 2 (front-middle / center) — index 3
+const FRONT_RIGHT_CANOPY_OFFSET = { x: -45, y: -150 }; // TREE 3 (front-right) — index 4
+
+// Maps each TREE_LAYOUT index (fixed order — see the array above) to its
+// OWN independent offset object — no sharing between any two trees.
+// Index-based rather than a new TreeLayoutSlot field so TREE_LAYOUT itself
+// stays untouched.
+const CANOPY_OFFSET_BY_INDEX = [
+  BACK_LEFT_CANOPY_OFFSET, // index 0 — TREE 4 (back-left)
+  BACK_RIGHT_CANOPY_OFFSET, // index 1 — TREE 5 (back-right)
+  FRONT_LEFT_CANOPY_OFFSET, // index 2 — TREE 1 (front-left)
+  CENTER_CANOPY_OFFSET, // index 3 — TREE 2 (front-middle / center)
+  FRONT_RIGHT_CANOPY_OFFSET, // index 4 — TREE 3 (front-right)
+];
+
 /**
  * Apple anchor zones as fractions of the canopy's own measured content
  * height/width (see PROJECT.md "Canopy Layer V1" section E: upper ~73% up,
@@ -188,8 +242,13 @@ const CANOPY_VERTICAL_NUDGE_BACK_PX = 56;
  * tree's own canopyOffsetY so all three anchors land on solid leaf
  * silhouette regardless of that tree's particular baked trunk height.
  */
+// Small fixed nudge on top of the upper anchor's fraction-derived Y (below)
+// — human visual feedback that the top fruit of the triangle sat slightly
+// too high relative to the lower two. Lower-left/lower-right are untouched.
+const UPPER_FRUIT_Y_NUDGE_PX = 7;
+
 function canopyFruitOffsets(canopyOffsetY: number): [number, number][] {
-  const upperY = canopyOffsetY - 0.73 * CANOPY_CONTENT_H;
+  const upperY = canopyOffsetY - 0.73 * CANOPY_CONTENT_H + UPPER_FRUIT_Y_NUDGE_PX;
   const lowerY = canopyOffsetY - 0.35 * CANOPY_CONTENT_H;
   const lowerX = 0.21 * CANOPY_DISPLAY_W;
   return [
@@ -199,11 +258,36 @@ function canopyFruitOffsets(canopyOffsetY: number): [number, number][] {
   ];
 }
 
-const ORCHARD_APPLE_BASE_PX = 80;
+const ORCHARD_APPLE_BASE_PX = 72; // was 80 — 90% size, uniform across all Orchard fruit
 const FRUIT_PIVOT_RADIUS = ORCHARD_APPLE_BASE_PX / 2;
 
 const REVEAL_POP_MS = 200;
 const REVEAL_SETTLE_MS = 300;
+
+// ------------------------------------------------------------------
+// Fruit-slot presentation stages (EMPTY -> BAGGED -> RIPE) — a pure
+// presentation layer on top of the existing per-slot `active`/`ripe`/
+// `timer` state (see types.ts FieldFruitSlot, Game.harvestFruitSlot,
+// systems/economy.ts fruitRegrowSeconds). Never changes actual regrowth
+// duration or Yield/active-slot-count — this only decides which of the
+// three visuals a given slot's CURRENT state maps to.
+// ------------------------------------------------------------------
+export type FruitStage = 'EMPTY' | 'BAGGED' | 'RIPE';
+
+// Bagged/growing art — neutral, does not depend on apple variety/color (see
+// PROJECT.md Orchard fruit-lifecycle presentation pass). Loaded the same way
+// as every other Orchard asset (see MainScene.preload()).
+export const ORCHARD_APPLE_BAGGED_KEY = 'orchard-apple-bagged';
+export const ORCHARD_APPLE_BAGGED_PATH = 'assets/apples/orchard_apple_bagged.png';
+
+// First slice of a slot's regrow window shows nothing (a short beat right
+// after harvest before the bag appears); the remainder shows the bagged/
+// growing art until the slot's own timer says ripe. Purely a split of the
+// EXISTING regrow duration (fruitRegrowSeconds) — never changes it. Kept as
+// one named constant so the split is easy to retune without touching the
+// stage logic itself.
+const GROW_EMPTY_FRACTION = 0.12; // 12% EMPTY, 88% BAGGED — within the requested 10-15% band
+const BAG_REVEAL_MS = 220; // quick fade/pop from EMPTY into BAGGED — no overshoot, unlike the ripe reveal below
 
 // ------------------------------------------------------------------
 // Living Orchard Motion Prototype — ambient wind sway tuning. See
@@ -236,8 +320,14 @@ const REVEAL_SETTLE_MS = 300;
 // a uniform ~25% amplitude cut that keeps the canopy/fruit/drift ratios
 // (and therefore the "canopy, plus a bit more" relationship) identical to
 // before, not a redesign of the response-speed/timing constants below.
-const CANOPY_SWAY_MAX_DEG = 2.175; // was 2.9 (~1.8x the original 1.6deg) — now ~25% smaller
-const CANOPY_DRIFT_MAX_PX = 3.75; // was 5 — small horizontal lean alongside the rotation, same direction, same shared signal
+// RETUNE 2 (human visual feedback: foliage sway still slightly too strong).
+// Another ~20% cut, same three constants, same ratio-preserving approach:
+// 2.175->1.75, 3.75->3.0, 3.15->2.5.
+// RETUNE 3 (human visual feedback: still a touch too lively). Another 25%
+// cut, same three constants, same ratio-preserving approach, WindModel/gust
+// timing/response-rate ranges untouched: 1.75->1.3125, 3.0->2.25, 2.5->1.875.
+const CANOPY_SWAY_MAX_DEG = 1.3125; // was 1.75 — now 25% smaller
+const CANOPY_DRIFT_MAX_PX = 2.25; // was 3.0 — small horizontal lean alongside the rotation, same direction, same shared signal
 const TREE_AMP_SCALE_MIN = 0.9; // ±10% — was ±18%; kept small so the shared wind stays the obvious primary driver
 const TREE_AMP_SCALE_MAX = 1.1;
 const TREE_RESPONSE_RATE_MIN = 5; // higher = snappier; ~0.05-0.20s settle lag between trees (was ~0.5-0.8s — too slow, read as separate cycles)
@@ -248,7 +338,7 @@ const TREE_RESPONSE_RATE_MAX = 20;
 // THIS tree's own current canopy angle (so it stays "the canopy, plus a
 // bit more") and eased in more slowly than the canopy itself so it visibly
 // lags — a filter-lag effect, not a literal delay timer.
-const FRUIT_SWAY_MAX_DEG = 3.15; // was 4.2 (~1.9x the original 2.2deg) — now ~25% smaller, same scale factor as CANOPY_SWAY_MAX_DEG above
+const FRUIT_SWAY_MAX_DEG = 1.875; // was 2.5 — now 25% smaller, same scale factor as CANOPY_SWAY_MAX_DEG above
 const FRUIT_RESPONSE_RATE_MIN = 4; // slower than canopy's own 5-20 -> ~0.10-0.25s perceived lag behind it
 const FRUIT_RESPONSE_RATE_MAX = 10;
 const FRUIT_AMP_SCALE_MIN = 0.8; // unchanged — small per-fruit variation, never the dominant signal
@@ -306,6 +396,10 @@ class FruitSlot {
   readonly index: number;
   private scene: Phaser.Scene;
   private apple: AppleVisual;
+  // Bagged/growing art (see ORCHARD_APPLE_BAGGED_KEY above) — a sibling
+  // visual under the same pivot, toggled with `apple` so only one is ever
+  // visible at a time. Neutral art, never redrawn per-variety.
+  private bag: Phaser.GameObjects.Image;
   private hooks: HarvestHooks;
   // Minimal ring indicator for a ripe Genetic Exceptional fruit only (see
   // PROJECT.md "Exceptional Specimen genetics core" section 12) — a plain
@@ -322,6 +416,13 @@ class FruitSlot {
   revealed = false;
   private revealing = false;
   private consumed = false;
+  // True from the instant a harvest click is accepted until its
+  // shrink/fade pop tween fully completes. While true, OrchardTreeLayer.sync()
+  // skips this slot ENTIRELY (identity redraw AND stage transitions) — see
+  // sync() — so the exact apple visual/size the player clicked stays frozen
+  // through the whole animation instead of possibly being swapped out from
+  // under it mid-tween (see PROJECT.md harvest-disappear-color-bug fix).
+  private poppingOut = false;
   // Secondary wind sway (see class doc comment + tuning block above) — own
   // amplitude/response speed rolled ONCE per fruit slot so 15 apples on the
   // same tree don't all wobble identically either.
@@ -339,6 +440,16 @@ class FruitSlot {
     this.pivot = scene.add.container(offsetX, offsetY - FRUIT_PIVOT_RADIUS);
     this.apple = new AppleVisual(scene, 0, FRUIT_PIVOT_RADIUS, ORCHARD_APPLE_BASE_PX);
     this.pivot.add(this.apple);
+    // Bagged art: same anchor as the apple, uniformly scaled to the same
+    // ORCHARD_APPLE_BASE_PX longest-edge target so it reads as "roughly
+    // comparable size" to the ripe apple (same technique AppleVisual.draw
+    // uses). Sized once here, never redrawn — bag art is neutral/fixed.
+    this.bag = scene.add.image(0, FRUIT_PIVOT_RADIUS, ORCHARD_APPLE_BAGGED_KEY);
+    this.bag.setOrigin(0.5, 0.5);
+    const bagLongestEdge = Math.max(this.bag.width, this.bag.height);
+    this.bag.setScale(bagLongestEdge > 0 ? ORCHARD_APPLE_BASE_PX / bagLongestEdge : 1);
+    this.bag.setVisible(false);
+    this.pivot.add(this.bag);
     this.exceptionalRing = scene.add.graphics();
     this.exceptionalRing.setVisible(false);
     this.pivot.add(this.exceptionalRing);
@@ -420,22 +531,70 @@ class FruitSlot {
     }
   }
 
-  showInstantly(): void {
-    this.revealed = true;
-    this.revealing = false;
-    this.consumed = false;
-    this.pivot.setScale(1);
-    this.pivot.setAlpha(1);
-    this.pivot.setAngle(0);
+  isPoppingOut(): boolean {
+    return this.poppingOut;
   }
 
-  hideInstantly(): void {
-    this.revealed = false;
+  /** Instantly snaps to a stage with no animation — used for hard resets (field/variety switch) and any stage change not caused by the player's own harvest-pop tween. */
+  snapToStage(stage: FruitStage): void {
+    this.scene.tweens.killTweensOf(this.pivot);
     this.revealing = false;
+    this.revealed = stage === 'RIPE';
     this.consumed = false;
-    this.pivot.setScale(0);
-    this.pivot.setAlpha(0);
+    this.apple.setVisible(stage === 'RIPE');
+    this.bag.setVisible(stage === 'BAGGED');
+    const visible = stage !== 'EMPTY';
+    this.pivot.setScale(visible ? 1 : 0);
+    this.pivot.setAlpha(visible ? 1 : 0);
     this.pivot.setAngle(0);
+    if (stage !== 'RIPE') this.setExceptional(false);
+  }
+
+  /**
+   * Animated forward transition into BAGGED (quick fade, no overshoot) or
+   * RIPE (the original small-overshoot pop-in, unchanged). Only reaching
+   * RIPE makes the fruit harvestable — `revealed`/`revealing` gate
+   * attemptHarvest exactly as before, so bagged fruit is never harvestable
+   * mid- or post-animation.
+   */
+  growInto(scene: Phaser.Scene, stage: 'BAGGED' | 'RIPE'): void {
+    this.scene.tweens.killTweensOf(this.pivot);
+    this.apple.setVisible(stage === 'RIPE');
+    this.bag.setVisible(stage === 'BAGGED');
+    if (stage !== 'RIPE') this.setExceptional(false);
+    const toRipe = stage === 'RIPE';
+    this.revealing = toRipe;
+    this.pivot.setScale(0);
+    this.pivot.setAlpha(toRipe ? 0.4 : 0);
+    this.pivot.setAngle(0);
+    const settle = (duration: number) => {
+      scene.tweens.add({
+        targets: this.pivot,
+        scale: 1.0,
+        alpha: 1,
+        duration,
+        ease: 'Sine.easeInOut',
+        onComplete: () => {
+          this.revealing = false;
+          this.revealed = toRipe;
+          this.consumed = false;
+        },
+      });
+    };
+    if (toRipe) {
+      // small -> expands (slight overshoot) -> settles, ~0.5s total — same
+      // pop the ripe reveal has always used.
+      scene.tweens.add({
+        targets: this.pivot,
+        scale: 1.08,
+        alpha: 0.9,
+        duration: REVEAL_POP_MS,
+        ease: 'Sine.easeOut',
+        onComplete: () => settle(REVEAL_SETTLE_MS),
+      });
+    } else {
+      settle(BAG_REVEAL_MS);
+    }
   }
 
   // Click, or hold-and-sweep-over, this specific ripe fruit. Only revealed,
@@ -455,6 +614,7 @@ class FruitSlot {
 
     this.consumed = true;
     this.revealed = false;
+    this.poppingOut = true;
     // Only scale/alpha are tweened here — angle is driven every frame by
     // updateSway() (ambient wind), so the two compose instead of fighting;
     // no killTweensOf/angle reset needed since no tween ever targets angle.
@@ -464,39 +624,17 @@ class FruitSlot {
       alpha: 0,
       duration: HARVEST_POP_MS,
       ease: 'Cubic.easeIn',
-    });
-  }
-
-  reveal(scene: Phaser.Scene): void {
-    if (this.revealed || this.revealing) return;
-    this.revealing = true;
-    this.pivot.setScale(0);
-    this.pivot.setAlpha(0.4);
-    this.pivot.setAngle(0);
-    // small -> expands (slight overshoot) -> settles, ~0.5s total.
-    scene.tweens.add({
-      targets: this.pivot,
-      scale: 1.08,
-      alpha: 0.9,
-      duration: REVEAL_POP_MS,
-      ease: 'Sine.easeOut',
       onComplete: () => {
-        scene.tweens.add({
-          targets: this.pivot,
-          scale: 1.0,
-          alpha: 1,
-          duration: REVEAL_SETTLE_MS,
-          ease: 'Sine.easeInOut',
-          onComplete: () => {
-            this.revealing = false;
-            this.revealed = true;
-            // A freshly regrown fruit must always be harvestable again —
-            // without this, a slot harvested once (consumed=true) would
-            // stay stuck un-harvestable forever since hardReset (the old
-            // place `consumed` got cleared) no longer happens every cycle.
-            this.consumed = false;
-          },
-        });
+        // Only NOW — fully hidden, tween complete — may this slot's visual
+        // move on to EMPTY/BAGGED for the next growth cycle (see
+        // OrchardTreeLayer.sync()'s isPoppingOut() guard, which is what
+        // kept the exact clicked apple frozen/unswapped for the whole
+        // animation above).
+        this.poppingOut = false;
+        this.consumed = false;
+        this.apple.setVisible(false);
+        this.bag.setVisible(false);
+        this.setExceptional(false);
       },
     });
   }
@@ -569,13 +707,27 @@ class TreeNode {
     // pointer input.
     const rowNudge = layout.row === 'back' ? CANOPY_VERTICAL_NUDGE_BACK_PX : CANOPY_VERTICAL_NUDGE_FRONT_PX;
     const canopyY = layout.canopyOffsetY + rowNudge;
-    const canopy = scene.add.image(0, canopyY, ORCHARD_CANOPY_KEY);
+    // Per-tree canopy offset (see BACK_LEFT_/BACK_RIGHT_/FRONT_LEFT_/CENTER_/
+    // FRONT_RIGHT_CANOPY_OFFSET above) — applied to BOTH the canopy image's
+    // own local position AND the fruit anchors below (same offsetX/offsetY),
+    // so a tree's apples move by the exact same amount as its canopy and
+    // FruitSlot hit areas stay centered on the visible fruit. TREE_LAYOUT's
+    // own x/groundY/canopyOffsetY and the row nudge above are untouched.
+    const canopyOffset = CANOPY_OFFSET_BY_INDEX[treeIndex];
+    const canopyDrawY = canopyY + canopyOffset.y;
+    const canopy = scene.add.image(canopyOffset.x, canopyDrawY, ORCHARD_CANOPY_KEY);
     canopy.setOrigin(0.5, CANOPY_ANCHOR_FRAC);
     canopy.setDisplaySize(CANOPY_DISPLAY_W, CANOPY_DISPLAY_H);
     if (layout.flip) canopy.setFlipX(true);
+    // Canopy-only subtle color tone-down (see CANOPY_COLOR_TINT above) —
+    // apples, background, sky/clouds, and UI are separate Game Objects and
+    // are never touched by this.
+    canopy.setTint(CANOPY_COLOR_TINT);
     this.windPivot.add(canopy);
 
-    const fruitOffsets = canopyFruitOffsets(canopyY);
+    const fruitOffsets = canopyFruitOffsets(canopyDrawY).map(
+      ([ox, oy]): [number, number] => [ox + canopyOffset.x, oy],
+    );
     this.slots = fruitOffsets.map(([ox, oy], waveIdx) => {
       const slot = new FruitSlot(scene, ox, oy, hooks, treeIndex * FRUIT_PER_TREE + waveIdx);
       this.windPivot.add(slot.pivot);
@@ -623,6 +775,15 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
   // fruit on just that one slot, and revert once it's harvested/regrown as
   // ordinary fruit, without re-drawing all 15 slots on every sync() call.
   private lastSlotVisualKey: string[];
+  // Per-slot presentation bookkeeping for the EMPTY -> BAGGED -> RIPE stage
+  // split (see GROW_EMPTY_FRACTION above) — growCycleTotal[i] is the
+  // best-known total duration of slot i's CURRENT regrow cycle (captured
+  // the first time that cycle is observed, from the slot's own live
+  // timer — never a separately tracked/authoritative duration), and
+  // lastStage[i] is the stage last applied to that slot's visual, so
+  // sync() only re-triggers a stage transition when it actually changes.
+  private growCycleTotal: number[];
+  private lastStage: FruitStage[];
   private currentField: Field | null = null;
   private game: Game;
   // True while the primary pointer is held down, tracked globally (scene
@@ -658,6 +819,8 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     });
     this.allSlots = this.trees.flatMap((tree) => tree.slots);
     this.lastSlotVisualKey = new Array(this.allSlots.length).fill('');
+    this.growCycleTotal = new Array(this.allSlots.length).fill(0);
+    this.lastStage = new Array(this.allSlots.length).fill('EMPTY');
     scene.add.existing(this);
 
     // Global hold-and-sweep: track primary-pointer state at the scene
@@ -690,6 +853,27 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     return this.allSlots.filter((slot) => slot.revealed).length;
   }
 
+  /**
+   * Presentation stage for slot i, purely derived from the field's own
+   * live `active`/`ripe`/`timer` state (see FieldFruitSlot) — never reads
+   * or writes anything gameplay-facing. `growCycleTotal[i]` is updated as
+   * a side effect: whenever the slot is growing and its remaining timer is
+   * HIGHER than the last-recorded total, a fresh regrow cycle must have
+   * just started (the timer only ever counts down within one cycle), so
+   * the new value becomes the total that EMPTY/BAGGED elapsed-fraction is
+   * measured against.
+   */
+  private stageForSlot(s: FieldFruitSlot, i: number): FruitStage {
+    if (!s.active) return 'EMPTY';
+    if (s.ripe) return 'RIPE';
+    if (s.timer > this.growCycleTotal[i] + 0.001) {
+      this.growCycleTotal[i] = s.timer;
+    }
+    const total = this.growCycleTotal[i];
+    const elapsedFraction = total > 0 ? 1 - s.timer / total : 1;
+    return elapsedFraction < GROW_EMPTY_FRACTION ? 'EMPTY' : 'BAGGED';
+  }
+
   /** Called every real frame; safe to call even while Orchard isn't the visible screen. */
   sync(field: Field, variety: Variety, dtSeconds: number): void {
     this.currentField = field;
@@ -697,14 +881,23 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     const identityKey = `${field.id}:${variety.id}:${field.policy}`;
     const hardReset = identityKey !== this.lastIdentityKey;
 
-    // Each slot shows either the planted Line's own visual, or — if it's
-    // currently holding a special mutation fruit — that Specimen's own
-    // visual/size instead (see PROJECT.md section 6: the player must be
-    // able to physically notice a different apple among the ordinary
-    // fruit). Only re-drawn when a slot's own identity actually changed
-    // (Specimen appeared/was harvested, or a hard field/variety switch),
-    // not every frame.
     field.slots.forEach((s, i) => {
+      const slot = this.allSlots[i];
+      // Frozen mid-harvest-pop (see FruitSlot.attemptHarvest/isPoppingOut):
+      // skip BOTH the identity redraw and the stage transition below for
+      // this slot entirely until its disappear tween fully completes, so
+      // the exact apple the player clicked can never be swapped out from
+      // under it mid-animation (this was the cause of the harvest-disappear
+      // color bug — see PROJECT.md).
+      if (slot.isPoppingOut()) return;
+
+      // Each slot shows either the planted Line's own visual, or — if it's
+      // currently holding a special mutation fruit — that Specimen's own
+      // visual/size instead (see PROJECT.md section 6: the player must be
+      // able to physically notice a different apple among the ordinary
+      // fruit). Only re-drawn when a slot's own identity actually changed
+      // (Specimen appeared/was harvested, or a hard field/variety switch),
+      // not every frame.
       const specimen = s.specimen;
       // Ordinary fruit always shows the Line's stable baseVisualId, never
       // its special identity visualId — a Rare/Epic lineage grows its
@@ -715,27 +908,34 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
       const size = specimen ? specimen.size : eff.size;
       const key = specimen ? `specimen:${specimen.id}` : `line:${variety.id}:${Math.round(size)}`;
       if (hardReset || this.lastSlotVisualKey[i] !== key) {
-        this.allSlots[i].setTraits(visualId, size);
+        slot.setTraits(visualId, size);
         // Genetic Exceptional fruit is a normal production visual (see
         // PROJECT.md section 6), never a Visual Mutation — the ring is the
         // only thing distinguishing it on the tree (see section 12).
-        this.allSlots[i].setExceptional(!!specimen?.exceptionalArchetype);
+        slot.setExceptional(!!specimen?.exceptionalArchetype);
         this.lastSlotVisualKey[i] = key;
       }
-    });
 
-    if (hardReset) {
-      // Switching fields/variety: snap every slot straight to this field's
-      // actual per-slot state — no replaying grow animations for fruit
-      // that ripened while this field was in the background, and no
-      // regenerating fruit that was already individually harvested.
-      field.slots.forEach((s, i) => (s.ripe ? this.allSlots[i].showInstantly() : this.allSlots[i].hideInstantly()));
-    } else {
-      field.slots.forEach((s, i) => {
-        const slot = this.allSlots[i];
-        if (s.ripe && !slot.revealed) slot.reveal(this.scene);
-      });
-    }
+      // EMPTY -> BAGGED -> RIPE presentation stage (see stageForSlot above).
+      // Switching fields/variety (hardReset) snaps every slot straight to
+      // its target stage with no replayed animation; otherwise a stage
+      // change only ever animates forward (EMPTY->BAGGED, ->RIPE) — any
+      // other change (e.g. Closing's own non-click auto-harvest making a
+      // slot un-ripe) snaps instantly rather than double-animating on top
+      // of a harvest-pop that already played (or, for a non-click harvest,
+      // never played one to begin with).
+      const stage = this.stageForSlot(s, i);
+      if (hardReset) {
+        slot.snapToStage(stage);
+      } else if (stage !== this.lastStage[i]) {
+        if (stage === 'BAGGED' || stage === 'RIPE') {
+          slot.growInto(this.scene, stage);
+        } else {
+          slot.snapToStage(stage);
+        }
+      }
+      this.lastStage[i] = stage;
+    });
 
     // Ambient wind — advanced once here (never per-tree) so every tree/fruit
     // samples the exact same underlying signal; only ticks while sync() is

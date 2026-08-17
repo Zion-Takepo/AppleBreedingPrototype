@@ -10,9 +10,15 @@ import {
   ORCHARD_CLOUD_PATH,
   ORCHARD_SKY_KEY,
   ORCHARD_SKY_PATH,
+  ORCHARD_STATS_FRAME_KEY,
+  ORCHARD_STATS_FRAME_PATH,
   OrchardScreen,
+  WIND_FOLIAGE_TOP_LEFT_KEY,
+  WIND_FOLIAGE_TOP_LEFT_PATH,
+  WIND_FOLIAGE_TOP_RIGHT_KEY,
+  WIND_FOLIAGE_TOP_RIGHT_PATH,
 } from '../ui/OrchardScreen.ts';
-import { ORCHARD_CANOPY_KEY, ORCHARD_CANOPY_PATH } from '../render/OrchardTreeLayer.ts';
+import { ORCHARD_CANOPY_KEY, ORCHARD_CANOPY_PATH, ORCHARD_APPLE_BAGGED_KEY, ORCHARD_APPLE_BAGGED_PATH } from '../render/OrchardTreeLayer.ts';
 import { BreedScreen } from '../ui/BreedScreen.ts';
 import { CalendarScreen } from '../ui/CalendarScreen.ts';
 import { CollectionScreen } from '../ui/CollectionScreen.ts';
@@ -97,6 +103,10 @@ export class MainScene extends Phaser.Scene {
     this.load.image(ORCHARD_SKY_KEY, ORCHARD_SKY_PATH);
     this.load.image(ORCHARD_CLOUD_KEY, ORCHARD_CLOUD_PATH);
     this.load.image(ORCHARD_CANOPY_KEY, ORCHARD_CANOPY_PATH);
+    this.load.image(ORCHARD_APPLE_BAGGED_KEY, ORCHARD_APPLE_BAGGED_PATH);
+    this.load.image(ORCHARD_STATS_FRAME_KEY, ORCHARD_STATS_FRAME_PATH);
+    this.load.image(WIND_FOLIAGE_TOP_LEFT_KEY, WIND_FOLIAGE_TOP_LEFT_PATH);
+    this.load.image(WIND_FOLIAGE_TOP_RIGHT_KEY, WIND_FOLIAGE_TOP_RIGHT_PATH);
   }
 
   create(): void {
@@ -112,6 +122,9 @@ export class MainScene extends Phaser.Scene {
     this.textures.get(ORCHARD_SKY_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
     this.textures.get(ORCHARD_CLOUD_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
     this.textures.get(ORCHARD_CANOPY_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_STATS_FRAME_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(WIND_FOLIAGE_TOP_LEFT_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(WIND_FOLIAGE_TOP_RIGHT_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
 
     const bg = this.add.graphics();
     bg.fillStyle(THEME.bgSky, 1);

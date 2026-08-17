@@ -6,11 +6,12 @@ import { TUNING } from '../tuning.ts';
 import { OrchardTreeLayer } from '../render/OrchardTreeLayer.ts';
 import { AppleVisual } from '../render/AppleVisual.ts';
 import { LAYOUT, ORCHARD, THEME } from './theme.ts';
-import { Button, text as mkText } from './uiKit.ts';
+import { Button, orchardFrame, text as mkText } from './uiKit.ts';
 import { ToastQueue } from './modals.ts';
 import { openVarietyPickerModal } from './varietyPicker.ts';
 import { catalogLabel } from '../render/appleAssets.ts';
 import { openShippingInfraModal } from './ShippingInfraModal.ts';
+import { createStatInfoButton } from './StatHelpModal.ts';
 
 // ------------------------------------------------------------------
 // Orchard UI redesign (see PROJECT.md "Orchard UI redesign") — final
@@ -38,6 +39,28 @@ export const ORCHARD_SKY_PATH = 'assets/orchard/orchard_sky_day_v1.png';
 export const ORCHARD_CLOUD_KEY = 'orchard-cloud';
 export const ORCHARD_CLOUD_PATH = 'assets/orchard/orchard_cloud.png';
 
+// Stats card frame (premium cream/parchment + gold plaque) — a NineSlice
+// asset replacing only the Graphics fill/border the Stats card used to draw
+// itself. Pre-cropped to its opaque bounds and downscaled 1920x526 ->
+// 336x92 (uniform 0.175 scale) offline so the corner ornament (rounded
+// "eared" corner + leaf motif) samples at roughly the same pixel density it
+// will actually be displayed at — see SC_FRAME_BORDER below for how the
+// slice values were measured against this specific downscaled asset.
+export const ORCHARD_STATS_FRAME_KEY = 'orchard-stats-frame';
+export const ORCHARD_STATS_FRAME_PATH = 'assets/ui/orchard_stats_frame_9slice.png';
+
+// Wind foreground foliage (visual experiment) — corner-anchored overhanging
+// branch overlays so the wind reads across the whole scene rather than only
+// the apple trees swaying. Non-interactive, drawn in front of the
+// background/trees but behind all UI (see the Container add() order in the
+// constructor) — see FOLIAGE_LAYERS below for placement/sway tuning.
+// Bottom-left/bottom-right corner foliage was tried and removed; top-left and
+// top-right are the only layers. Do not reintroduce bottom foliage.
+export const WIND_FOLIAGE_TOP_LEFT_KEY = 'wind-foliage-top-left';
+export const WIND_FOLIAGE_TOP_LEFT_PATH = 'assets/orchard/wind/wind_foliage_top_left.png';
+export const WIND_FOLIAGE_TOP_RIGHT_KEY = 'wind-foliage-top-right';
+export const WIND_FOLIAGE_TOP_RIGHT_PATH = 'assets/orchard/wind/wind_foliage_top_right.png';
+
 // Cloud drift (see PROJECT.md orchard visual-integration pass) — very slow,
 // constant horizontal drift only (no vertical bob/scale/rotation/parallax).
 // Two instances of the same cloud texture, placed edge-to-edge and both
@@ -49,6 +72,137 @@ const CLOUD_DISPLAY_W = LAYOUT.width;
 const CLOUD_DISPLAY_H = LAYOUT.height;
 const CLOUD_TRAVERSAL_SECONDS = 230;
 const CLOUD_DRIFT_PX_PER_SEC = CLOUD_DISPLAY_W / CLOUD_TRAVERSAL_SECONDS;
+
+// Background "breathing" drift (visual experiment) — very subtle continuous
+// motion on ONLY the static landscape/trunks image (`this.background`), so
+// it doesn't read as a completely frozen painting now that sky/clouds/
+// canopies all move. Three independent, incommensurate periods (same
+// "avoid a repetitive single-oscillator look" idea `orchardWind.ts` already
+// uses for canopy sway) drifted with plain sine waves — continuous velocity
+// through zero, i.e. already Sine.easeInOut-equivalent, no linear snap.
+// Ticked from updateTrees() below, so it shares the exact same Breed-pause
+// gating (MainScene.update()'s `farmPaused` check) every other Orchard
+// ambient-motion timer already uses — never advances while Breed is active,
+// never catches up on resume.
+const BG_DRIFT_X_PX = 4;
+const BG_DRIFT_Y_PX = 2;
+const BG_DRIFT_X_PERIOD_S = 18;
+const BG_DRIFT_Y_PERIOD_S = 14;
+const BG_SCALE_AMPLITUDE = 0.004; // +-0.4% around the fitted base scale
+const BG_SCALE_PERIOD_S = 20;
+// Base overscan so the drifted/scaled image edges never reveal a
+// transparent gap at the 1600x900 canvas edges even at the worst-case
+// simultaneous extreme (max drift + max shrink at once): needs >=0.9%
+// (driven by the horizontal 4px drift), 1.5% picked for a small safety
+// margin — not a material zoom of the composition.
+const BG_OVERSCAN = 1.015;
+
+// Wind foreground foliage placement/sway (visual experiment). Coordinates
+// below are in absolute 1600x900 canvas space (converted to this
+// Container's own local space the same way sky/clouds/background already
+// are, by subtracting LAYOUT.contentTop from y at construction time) so
+// they line up with the rest of the corner-anchored layout math in this
+// file. Each layer's origin sits at the corner its "root" should read as
+// growing from off-screen — top-left pivots at its own top-left corner —
+// combined with a small negative position offset (pushing that corner a
+// little past the canvas edge) so the branch base is never visibly cut off
+// mid-shape, it just isn't there. Since the pivot itself sits just
+// off-canvas and only ever jitters by under a px around that offset (never
+// crossing back onto the visible canvas), the small rotation/x-sway below
+// can never open a gap between the branch and the screen border.
+//
+// Both foliage layers now sample ONE shared wind signal (`sampleFoliageWind`
+// below) rather than each defining its own independent sine periods/phases —
+// the exact same "one shared breeze, small per-instance variation" pattern
+// `orchardWind.ts`/`OrchardTreeLayer.ts` already uses for the 5 canopies
+// (every tree samples the identical `wind.value`, then applies only a small
+// per-tree amplitude scale and settle-lag rolled once at construction — see
+// PROJECT.md "Living Orchard Motion Prototype"). Each layer's own
+// `ampScale`/`responseLagS` are that same kind of small, fixed-at-authoring
+// variation: `ampScale` scales the shared signal's amplitude a little,
+// `responseLagS` samples the shared signal slightly in the past (as if that
+// side's leaves settle a beat later) — never a second independent
+// oscillator, never a random per-frame offset, so both layers still
+// generally lean the same direction at the same time.
+//
+// The shared signal itself sums two slow, close-but-incommensurate sine
+// periods (same "avoid a repetitive single-oscillator look" idea
+// orchardWind.ts uses for canopy sway) so the swing amplitude slowly
+// breathes between roughly its two component amplitudes over a long
+// (~30s+) beat instead of repeating on a fixed metronome — deliberately
+// calm, meant to read as "the leaves are responding to wind" without the
+// overlay's own motion ever being consciously noticed.
+const FOLIAGE_ROT_AMP_DEG = 0.2;
+const FOLIAGE_ROT_PERIOD_S = 6.0;
+const FOLIAGE_ROT_PHASE = 0;
+const FOLIAGE_ROT_AMP_DEG_2 = 0.1;
+const FOLIAGE_ROT_PERIOD_S_2 = 7.4;
+const FOLIAGE_ROT_PHASE_2 = 1.7;
+const FOLIAGE_X_AMP_PX = 0.75;
+const FOLIAGE_X_PERIOD_S = 6.6;
+const FOLIAGE_X_PHASE = 0.8;
+
+/** The one shared wind-foliage signal both corner layers sample (see above). */
+function sampleFoliageWind(t: number): { angle: number; offsetX: number } {
+  const angle =
+    FOLIAGE_ROT_AMP_DEG * Math.sin((2 * Math.PI * t) / FOLIAGE_ROT_PERIOD_S + FOLIAGE_ROT_PHASE) +
+    FOLIAGE_ROT_AMP_DEG_2 * Math.sin((2 * Math.PI * t) / FOLIAGE_ROT_PERIOD_S_2 + FOLIAGE_ROT_PHASE_2);
+  const offsetX = FOLIAGE_X_AMP_PX * Math.sin((2 * Math.PI * t) / FOLIAGE_X_PERIOD_S + FOLIAGE_X_PHASE);
+  return { angle, offsetX };
+}
+
+type FoliageLayerConfig = {
+  key: string;
+  originX: number;
+  originY: number;
+  x: number;
+  y: number;
+  displayW: number;
+  displayH: number;
+  // Small per-side variation on top of the one shared signal above — see
+  // the comment block above for why these exist instead of a second
+  // independent oscillator.
+  ampScale: number;
+  responseLagS: number;
+};
+
+const FOLIAGE_LAYERS: FoliageLayerConfig[] = [
+  // Top-left overhanging branch/leaves — the original/approved layer.
+  // ampScale 1 / responseLagS 0 means it samples the shared signal exactly
+  // as-is, so its motion is unchanged from before this pass.
+  {
+    key: WIND_FOLIAGE_TOP_LEFT_KEY,
+    originX: 0,
+    originY: 0,
+    x: -24,
+    y: -20,
+    displayW: 480,
+    displayH: 360,
+    ampScale: 1,
+    responseLagS: 0,
+  },
+  // Top-right overhanging branch/leaves — same corner-anchoring approach as
+  // top-left (own top-right corner pivot, pushed slightly past the canvas
+  // edge). Position/size/depth/origin/artwork unchanged from the prior
+  // pass. Samples the SAME shared wind signal as top-left, scaled 0.9x
+  // (10% softer, within the requested +-10-15% band) and time-lagged 0.15s
+  // (within the same 0.05-0.20s settle-lag range OrchardTreeLayer.ts already
+  // uses per-tree) so it reads as "the same breeze, responding a beat later
+  // and a little softer" rather than a synchronized mirror or an unrelated
+  // second oscillator. Never increases global wind amplitude — ampScale
+  // here is < 1, and the underlying shared constants above are untouched.
+  {
+    key: WIND_FOLIAGE_TOP_RIGHT_KEY,
+    originX: 1,
+    originY: 0,
+    x: LAYOUT.width + 24,
+    y: -20,
+    displayW: 480,
+    displayH: 360,
+    ampScale: 0.9,
+    responseLagS: 0.15,
+  },
+];
 
 // Field card (top-left) — a small secondary label plus a compact
 // deep-forest pill (current Line + dropdown) and a separate cream/gold
@@ -66,17 +220,32 @@ const FC_DROPDOWN_W = 280;
 // Shared "secondary" tone for controls that are deliberately subordinate to
 // the deep-forest primary actions and the gold END DAY/HARVEST ALL accent —
 // Cultivation's unselected segments and CHANGE VARIETY (see fixes #3/#4).
-const SECONDARY_BG = 0xd9d3ac;
+const SECONDARY_BG = ORCHARD.mutedCream;
+
+// Styling pass (see PROJECT.md "Orchard UI Final Structure + Styling Pass"
+// section 5 "LOWER UI SAFE ZONE"): both lower cards share one bottom
+// alignment target, ~absolute y 820 — just above where BottomNav's own
+// visible bar now sits (moved down within its existing reserved band, see
+// BottomNav.ts BAR_Y/BAR_H), leaving a clean gap before the Nav without
+// widening LAYOUT.navHeight/contentBottom itself.
+const LOWER_CARD_BOTTOM = LAYOUT.contentHeight + 8;
 
 // Lower-left Stats card
-const SC_X = 16;
-const SC_W = 500;
-const SC_H = 130;
+const SC_X = 28;
+const SC_W = 460;
+const SC_H = 114;
+// NineSlice border sizes for ORCHARD_STATS_FRAME_KEY, measured directly off
+// the 336x92 downscaled asset (corner rounding + concave "ear" notch + leaf
+// ornament fully contained inside each corner box, safe straight trim
+// stretched everywhere else) — see the asset comment above for how the
+// source was prepared.
+const SC_FRAME_BORDER = { left: 37, right: 37, top: 40, bottom: 40 };
 
-// Lower-right Orchard action card (Cultivation / Change Variety / Packing / Harvest All)
-const AC_W = 480;
-const AC_H = 210;
-const AC_X = LAYOUT.width - 16 - AC_W;
+// Lower-right Orchard action card (top row: Change Variety + Packing;
+// middle row: Cultivation segmented control; bottom row: Harvest All)
+const AC_W = 460;
+const AC_H = 140;
+const AC_X = LAYOUT.width - 20 - AC_W;
 const AC_PAD = 16;
 
 type StatKey = 'sweetness' | 'size' | 'yield' | 'growth' | 'freshness';
@@ -127,6 +296,11 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   private cloudB: Phaser.GameObjects.Image;
   private cloudOffsetPx = 0;
   private background: Phaser.GameObjects.Image;
+  private backgroundBaseX = 0;
+  private backgroundBaseY = 0;
+  private backgroundElapsed = 0;
+  private foliageLayers: { img: Phaser.GameObjects.Image; cfg: FoliageLayerConfig; baseX: number; baseY: number }[] = [];
+  private foliageElapsed = 0;
   private treeLayer: OrchardTreeLayer;
   private fieldCard: Phaser.GameObjects.Container;
   private fieldDropdown: Phaser.GameObjects.Container;
@@ -194,18 +368,46 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     // painterly layer (see PROJECT.md), used exactly as supplied. Never
     // interactive, so it cannot capture pointer input or block fruit
     // click/sweep.
-    this.background = scene.add.image(0, -LAYOUT.contentTop, ORCHARD_BACKGROUND_KEY).setOrigin(0, 0);
-    this.background.setDisplaySize(LAYOUT.width, LAYOUT.height);
+    // Center-origin (rather than the other layers' top-left origin) so the
+    // small overscan/drift/breathing-scale below expands and shifts evenly
+    // around the canvas center instead of only ever growing off one edge.
+    this.backgroundBaseX = LAYOUT.width / 2;
+    this.backgroundBaseY = -LAYOUT.contentTop + LAYOUT.height / 2;
+    this.background = scene.add.image(this.backgroundBaseX, this.backgroundBaseY, ORCHARD_BACKGROUND_KEY).setOrigin(0.5, 0.5);
+    this.background.setDisplaySize(LAYOUT.width * BG_OVERSCAN, LAYOUT.height * BG_OVERSCAN);
 
     this.treeLayer = new OrchardTreeLayer(scene, game);
+
+    // WIND FOREGROUND FOLIAGE — never interactive, so it cannot capture
+    // pointer input or block fruit click/sweep. See FOLIAGE_LAYERS above
+    // for exact placement/sway tuning.
+    this.foliageLayers = FOLIAGE_LAYERS.map((cfg) => {
+      const baseX = cfg.x;
+      const baseY = cfg.y - LAYOUT.contentTop;
+      const img = scene.add.image(baseX, baseY, cfg.key).setOrigin(cfg.originX, cfg.originY);
+      img.setDisplaySize(cfg.displayW, cfg.displayH);
+      return { img, cfg, baseX, baseY };
+    });
+
     this.fieldCard = scene.add.container(0, 0);
     this.mainView = scene.add.container(0, 0);
     this.fieldDropdown = scene.add.container(0, 0);
     // Draw order: sky, clouds, landscape+trunks, then trees/canopies/fruit,
-    // then the field card, then the stats/action card content, then the
-    // field dropdown popup topmost (so it never renders underneath the card
-    // it opens from).
-    this.add([this.sky, this.cloudA, this.cloudB, this.background, this.treeLayer, this.fieldCard, this.mainView, this.fieldDropdown]);
+    // then the wind foreground foliage (in front of the background/trees,
+    // behind all UI), then the field card, then the stats/action card
+    // content, then the field dropdown popup topmost (so it never renders
+    // underneath the card it opens from).
+    this.add([
+      this.sky,
+      this.cloudA,
+      this.cloudB,
+      this.background,
+      this.treeLayer,
+      ...this.foliageLayers.map((f) => f.img),
+      this.fieldCard,
+      this.mainView,
+      this.fieldDropdown,
+    ]);
     scene.add.existing(this);
   }
 
@@ -222,6 +424,39 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.cloudOffsetPx = (this.cloudOffsetPx + CLOUD_DRIFT_PX_PER_SEC * dtSeconds) % CLOUD_DISPLAY_W;
     this.cloudA.x = -this.cloudOffsetPx;
     this.cloudB.x = CLOUD_DISPLAY_W - this.cloudOffsetPx;
+  }
+
+  /**
+   * Background "breathing" drift (see the BG_DRIFT_x / BG_SCALE_x constants
+   * above) — moves and scales ONLY `this.background` a very small amount
+   * around its base fitted position/size. Sky, clouds, canopy, apples, and
+   * UI are untouched by this method entirely.
+   */
+  private updateBackgroundDrift(dtSeconds: number): void {
+    this.backgroundElapsed += dtSeconds;
+    const t = this.backgroundElapsed;
+    const offsetX = BG_DRIFT_X_PX * Math.sin((2 * Math.PI * t) / BG_DRIFT_X_PERIOD_S);
+    const offsetY = BG_DRIFT_Y_PX * Math.sin((2 * Math.PI * t) / BG_DRIFT_Y_PERIOD_S);
+    const scaleMult = 1 + BG_SCALE_AMPLITUDE * Math.sin((2 * Math.PI * t) / BG_SCALE_PERIOD_S);
+    this.background.setPosition(this.backgroundBaseX + offsetX, this.backgroundBaseY + offsetY);
+    this.background.setDisplaySize(LAYOUT.width * BG_OVERSCAN * scaleMult, LAYOUT.height * BG_OVERSCAN * scaleMult);
+  }
+
+  /**
+   * Wind foreground foliage sway (see FOLIAGE_LAYERS/sampleFoliageWind
+   * above) — every layer samples the ONE shared wind signal, each applying
+   * only its own small ampScale/responseLagS variation on top, so all
+   * foliage layers stay tied to the same breeze rather than running
+   * independent oscillators.
+   */
+  private updateForegroundFoliage(dtSeconds: number): void {
+    this.foliageElapsed += dtSeconds;
+    const t = this.foliageElapsed;
+    for (const { img, cfg, baseX } of this.foliageLayers) {
+      const { angle, offsetX } = sampleFoliageWind(t - cfg.responseLagS);
+      img.setAngle(angle * cfg.ampScale);
+      img.x = baseX + offsetX * cfg.ampScale;
+    }
   }
 
   /** Verification-only: not used by any gameplay path. */
@@ -242,6 +477,8 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   /** Called every real frame from MainScene.update() so fruit-reveal/sway/cloud-drift animations progress smoothly. */
   updateTrees(dtSeconds: number): void {
     this.updateClouds(dtSeconds);
+    this.updateBackgroundDrift(dtSeconds);
+    this.updateForegroundFoliage(dtSeconds);
     const field = this.game.getField(this.selectedFieldId);
     if (!field || !field.varietyId) return;
     const variety = this.game.getVariety(field.varietyId);
@@ -285,11 +522,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     const nameText = mkText(this.scene, 0, 0, `${lineName}  ▼`, 17, ORCHARD.textWarmLight, true);
     const pillW = FC_PILL_PAD_X + FC_ICON_PX + 8 + nameText.width + FC_PILL_PAD_X;
 
-    const pillG = this.scene.add.graphics();
-    pillG.fillStyle(ORCHARD.forestDeep, 1);
-    pillG.fillRoundedRect(FC_X, FC_ROW_Y, pillW, FC_ROW_H, FC_ROW_H / 2);
-    pillG.lineStyle(1.5, ORCHARD.gold, 0.7);
-    pillG.strokeRoundedRect(FC_X, FC_ROW_Y, pillW, FC_ROW_H, FC_ROW_H / 2);
+    const pillG = orchardFrame(this.scene, FC_X, FC_ROW_Y, pillW, FC_ROW_H, { radius: FC_ROW_H / 2, outerAlpha: 0.7, inner: false });
     this.fieldCard.add(pillG);
 
     if (variety) {
@@ -318,16 +551,16 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.fieldCard.add(pillZone);
 
     // Separate compact "+ FIELD $cost" button beside the pill — warm
-    // cream/muted-gold styling, distinct from the pill's deep-forest fill.
+    // muted-cream / thin-gold-hairline styling, deliberately secondary to
+    // END DAY's solid gold fill (see PROJECT.md gold-usage rule: gold is an
+    // accent, not a general fill).
     let rightEdge = FC_X + pillW;
     if (nextId) {
       const price = this.priceForField(nextId);
       const addLabel = mkText(this.scene, 0, 0, `+ FIELD $${price}`, 16, ORCHARD.textDark, true);
       const addW = FC_PILL_PAD_X + addLabel.width + FC_PILL_PAD_X;
       const addX = rightEdge + 10;
-      const addG = this.scene.add.graphics();
-      addG.fillStyle(THEME.gold, 1);
-      addG.fillRoundedRect(addX, FC_ROW_Y, addW, FC_ROW_H, FC_ROW_H / 2);
+      const addG = orchardFrame(this.scene, addX, FC_ROW_Y, addW, FC_ROW_H, { fill: ORCHARD.mutedCream, radius: FC_ROW_H / 2, outerAlpha: 0.85, inner: false });
       this.fieldCard.add(addG);
       addLabel.setPosition(addX + addW / 2, FC_ROW_Y + FC_ROW_H / 2);
       addLabel.setOrigin(0.5);
@@ -369,11 +602,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     const y0 = FC_Y + this.fieldCardHeight + 6;
     const totalH = unlockedFields.length * rowH + 8;
 
-    const bg = this.scene.add.graphics();
-    bg.fillStyle(ORCHARD.cream, 0.99);
-    bg.fillRoundedRect(FC_X, y0, FC_DROPDOWN_W, totalH, 10);
-    bg.lineStyle(1.5, ORCHARD.gold, 0.8);
-    bg.strokeRoundedRect(FC_X, y0, FC_DROPDOWN_W, totalH, 10);
+    const bg = orchardFrame(this.scene, FC_X, y0, FC_DROPDOWN_W, totalH, { fill: ORCHARD.cream, fillAlpha: 0.99, radius: 10, outerAlpha: 0.8, inner: false });
     this.fieldDropdown.add(bg);
 
     unlockedFields.forEach((f, i) => {
@@ -466,25 +695,58 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   // only the numbers refresh on cultivation-policy changes.
   // ------------------------------------------------------------------
   private buildStatsCard(field: Field, variety: Variety): void {
-    const y = LAYOUT.contentHeight - 16 - SC_H;
-    const bg = this.scene.add.graphics();
-    bg.fillStyle(ORCHARD.cream, 0.97);
-    bg.fillRoundedRect(SC_X, y, SC_W, SC_H, 14);
-    bg.lineStyle(1.5, ORCHARD.gold, 0.75);
-    bg.strokeRoundedRect(SC_X, y, SC_W, SC_H, 14);
+    const y = LOWER_CARD_BOTTOM - SC_H;
+    // Old Graphics cream fill/border — kept only as a hidden fallback (see
+    // PROJECT.md "ART BOUNDARY" pattern already used for tree/canopy
+    // placeholders) in case the frame asset ever fails to load; never drawn
+    // on top of the new asset.
+    const bg = orchardFrame(this.scene, SC_X, y, SC_W, SC_H, { fill: ORCHARD.cream, fillAlpha: 0.97, radius: 14, outerAlpha: 0.75, innerColor: ORCHARD.forestMid, innerAlpha: 0.16 });
+    bg.setVisible(false);
     this.mainView.add(bg);
 
+    // New premium cream/parchment + gold NineSlice frame — corners render
+    // unstretched at their native asset resolution; only the flat edge/
+    // center regions stretch to fill the card's existing SC_X/SC_W/SC_H
+    // footprint (position/size unchanged from the old Graphics card).
+    const frame = this.scene.add.nineslice(
+      SC_X + SC_W / 2,
+      y + SC_H / 2,
+      ORCHARD_STATS_FRAME_KEY,
+      undefined,
+      SC_W,
+      SC_H,
+      SC_FRAME_BORDER.left,
+      SC_FRAME_BORDER.right,
+      SC_FRAME_BORDER.top,
+      SC_FRAME_BORDER.bottom,
+    );
+    this.mainView.add(frame);
+
     const colW = SC_W / STAT_ORDER.length;
+    const sepG = this.scene.add.graphics();
+    sepG.lineStyle(1, ORCHARD.gold, 0.35);
+    for (let i = 1; i < STAT_ORDER.length; i++) {
+      const sx = SC_X + colW * i;
+      sepG.lineBetween(sx, y + 18, sx, y + SC_H - 14);
+    }
+    this.mainView.add(sepG);
+
     this.statValueTexts = STAT_ORDER.map((s, i) => {
       const cx = SC_X + colW * i + colW / 2;
       const iconG = this.scene.add.graphics();
-      drawStatIcon(iconG, s.key, cx, y + 34);
+      drawStatIcon(iconG, s.key, cx, y + 28);
       this.mainView.add(iconG);
-      this.mainView.add(mkText(this.scene, cx, y + 58, s.label, 11, '#8a6d1a', true, true).setOrigin(0.5));
-      const valText = mkText(this.scene, cx, y + 80, '0', 24, ORCHARD.textDark, true, true).setOrigin(0.5);
+      this.mainView.add(mkText(this.scene, cx, y + 50, s.label, 11, '#8a6d1a', true, true).setOrigin(0.5));
+      const valText = mkText(this.scene, cx, y + 72, '0', 24, ORCHARD.textDark, true, true).setOrigin(0.5);
       this.mainView.add(valText);
       return valText;
     });
+
+    // Reuses the existing shared stat-help modal (see StatHelpModal.ts,
+    // already used identically on both Breed screens) rather than a second,
+    // duplicate stat-description system — a small subtle "i" affordance in
+    // the card's own top-right corner.
+    this.mainView.add(createStatInfoButton(this.scene, SC_X + SC_W - 18, y + 18, 12));
 
     this.updateStatsCard(field, variety);
   }
@@ -504,42 +766,83 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   // existing Shipping Infrastructure modal.
   // ------------------------------------------------------------------
   private buildActionCard(field: Field): void {
-    const y = LAYOUT.contentHeight - 16 - AC_H;
-    const bg = this.scene.add.graphics();
-    bg.fillStyle(ORCHARD.cream, 0.97);
-    bg.fillRoundedRect(AC_X, y, AC_W, AC_H, 14);
-    bg.lineStyle(1.5, ORCHARD.gold, 0.75);
-    bg.strokeRoundedRect(AC_X, y, AC_W, AC_H, 14);
+    const y = LOWER_CARD_BOTTOM - AC_H;
+    const bg = orchardFrame(this.scene, AC_X, y, AC_W, AC_H, { fill: ORCHARD.cream, fillAlpha: 0.97, radius: 14, outerAlpha: 0.75, innerColor: ORCHARD.forestMid, innerAlpha: 0.16 });
     this.mainView.add(bg);
 
-    this.mainView.add(mkText(this.scene, AC_X + AC_PAD, y + 12, 'CULTIVATION', 12, '#8a6d1a', true, true));
+    // Compact three-row hierarchy (see PROJECT.md "LOWER-RIGHT ORCHARD
+    // ACTION CARD"): TOP ROW = Change Variety (secondary) + Packing
+    // (informational, click preserved); MIDDLE ROW = Cultivation segmented
+    // control; BOTTOM ROW = HARVEST ALL at nearly full card width.
+    const padTop = 10;
+    const rowGap = 8;
+    const topRowH = 30;
+    const midRowH = 36;
+    const bottomRowH = AC_H - padTop - topRowH - rowGap - midRowH - rowGap - 6;
 
-    // Cultivation segmented control, restyled onto the Orchard palette:
-    // SELECTED = deep forest fill + warm cream text + a subtle gold accent
-    // border; UNSELECTED = a muted cream-green "secondary" fill + dark
-    // olive text — no more generic prototype grey.
+    // TOP ROW — CHANGE VARIETY: a smaller, lighter secondary action (muted
+    // cream, same tone as an unselected Cultivation segment) so it never
+    // competes with HARVEST ALL below.
+    const topRowY = y + padTop;
+    const cvW = 168;
+    this.changeVarietyBtn = new Button(
+      this.scene,
+      AC_X + AC_PAD + cvW / 2,
+      topRowY + topRowH / 2,
+      cvW,
+      topRowH,
+      'CHANGE VARIETY',
+      () => this.openVarietyPicker(field.id),
+      SECONDARY_BG,
+      13,
+      false,
+      ORCHARD.textDark,
+    );
+    this.mainView.add(this.changeVarietyBtn);
+
+    // TOP ROW — PACKING: mostly informational; existing click → Shipping
+    // Infrastructure behavior preserved. Right-aligned against the card's
+    // own right edge, filling the remaining top-row width.
+    this.packingText = mkText(this.scene, AC_X + AC_W - AC_PAD, topRowY + topRowH / 2, '', 16, ORCHARD.textDark, true, true).setOrigin(1, 0.5);
+    this.mainView.add(this.packingText);
+    const packingZoneX = AC_X + AC_PAD + cvW + 8;
+    const packingZoneW = AC_X + AC_W - AC_PAD - packingZoneX;
+    const packingZone = this.scene.add.zone(packingZoneX, topRowY, packingZoneW, topRowH).setOrigin(0, 0);
+    packingZone.setInteractive({ useHandCursor: true });
+    packingZone.on('pointerdown', () => openShippingInfraModal(this.scene, this.game));
+    this.mainView.add(packingZone);
+
+    // MIDDLE ROW — Cultivation label + segmented control, restyled onto the
+    // Orchard palette: SELECTED = deep forest fill + warm cream text + a
+    // thin gold accent border; UNSELECTED = muted-cream "secondary" fill +
+    // dark olive text.
+    const midRowY = topRowY + topRowH + rowGap;
+    const cultLabel = mkText(this.scene, AC_X + AC_PAD, midRowY + midRowH / 2, 'CULTIVATION', 11, '#8a6d1a', true, true).setOrigin(0, 0.5);
+    this.mainView.add(cultLabel);
+    const segStartX = AC_X + AC_PAD + cultLabel.width + 10;
+    const segEndX = AC_X + AC_W - AC_PAD;
+    const segGap = 6;
+    const segW = (segEndX - segStartX - segGap * 2) / 3;
     const policies: { id: CultivationPolicy; label: string }[] = [
       { id: 'NORMAL', label: 'NORMAL' },
       { id: 'SWEETEN', label: 'SWEETEN' },
       { id: 'GROW_BIG', label: 'GROW BIG' },
     ];
-    const segW = (AC_W - AC_PAD * 2 - 12) / 3;
-    const segY = y + 32;
     this.cultivationBtns = policies.map((p, i) => {
       const active = (field.pendingPolicy ?? field.policy) === p.id;
       const btn = new Button(
         this.scene,
-        AC_X + AC_PAD + segW / 2 + i * (segW + 6),
-        segY + 20,
+        segStartX + segW / 2 + i * (segW + segGap),
+        midRowY + midRowH / 2,
         segW,
-        40,
+        midRowH,
         p.label,
         () => {
           this.game.setFieldPolicy(field.id, p.id);
           this.render();
         },
         active ? ORCHARD.forestDeep : SECONDARY_BG,
-        16,
+        13,
         false,
         active ? ORCHARD.textWarmLight : ORCHARD.textDark,
       );
@@ -548,54 +851,22 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
       return { btn, policy: p.id };
     });
 
-    // CHANGE VARIETY — deliberately a smaller, lighter secondary action
-    // (same muted "secondary" tone as an unselected Cultivation segment)
-    // rather than a full-width saturated CTA, so it doesn't compete with
-    // HARVEST ALL below.
-    const changeVarietyY = segY + 56;
-    const cvW = 200;
-    this.changeVarietyBtn = new Button(
-      this.scene,
-      AC_X + AC_PAD + cvW / 2,
-      changeVarietyY + 18,
-      cvW,
-      36,
-      'CHANGE VARIETY',
-      () => this.openVarietyPicker(field.id),
-      SECONDARY_BG,
-      15,
-      false,
-      ORCHARD.textDark,
-    );
-    this.mainView.add(this.changeVarietyBtn);
-
-    // Bottom row: Packing (compact, informational/clickable) + HARVEST ALL
-    // — the primary Orchard action, given the most width/weight in the card.
-    const bottomRowY = changeVarietyY + 50;
-    const harvestW = 240;
-    const harvestH = 56;
-    this.packingText = mkText(this.scene, AC_X + AC_PAD, bottomRowY + harvestH / 2, '', 19, ORCHARD.textDark, true, true).setOrigin(0, 0.5);
-    this.mainView.add(this.packingText);
-    const packingZoneW = AC_W - AC_PAD - harvestW - 12 - AC_PAD;
-    const packingZone = this.scene.add.zone(AC_X, bottomRowY, packingZoneW, harvestH).setOrigin(0, 0);
-    packingZone.setInteractive({ useHandCursor: true });
-    packingZone.on('pointerdown', () => openShippingInfraModal(this.scene, this.game));
-    this.mainView.add(packingZone);
-
-    // HARVEST ALL — forest green (not gold, which stays reserved for END
-    // DAY/restrained accents), the strongest action in this card by both
-    // width and a gold accent border.
+    // BOTTOM ROW — HARVEST ALL: the strongest action inside this card, deep
+    // forest fill (not gold, which stays reserved for END DAY/restrained
+    // accents) with a thin gold accent border, spanning nearly the full
+    // card width.
+    const bottomRowY = midRowY + midRowH + rowGap;
     const anyRipe = field.slots.some((s) => s.ripe);
     this.harvestBtn = new Button(
       this.scene,
-      AC_X + AC_W - AC_PAD - harvestW / 2,
-      bottomRowY + harvestH / 2,
-      harvestW,
-      harvestH,
+      AC_X + AC_W / 2,
+      bottomRowY + bottomRowH / 2,
+      AC_W - AC_PAD * 2,
+      bottomRowH,
       'HARVEST ALL',
       () => this.treeLayer.harvestAllRemaining(),
       anyRipe ? ORCHARD.forestDeep : 0x9c9484,
-      20,
+      18,
     );
     this.harvestBtn.setAccent(true);
     this.harvestBtn.setEnabled(anyRipe);

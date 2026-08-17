@@ -611,6 +611,34 @@ by per-tree scale (rules B/G above are unchanged and still hold):
 - 2 of the 5 trees use `flip: true` (horizontal flip only, per B) to break
   up the obvious repetition of reusing one artwork 5 times.
 
+**Retune pass (canopy/fruit alignment + independent per-tree tuning).** The
+manual visual-offset system was originally 3 shared groups (back-left+right /
+center / front-left+right), which meant the far-right tree (TREE 3, index 4
+in `TREE_LAYOUT`) had no offset of its own — it silently shared
+`FRONT_CANOPY_VISUAL_OFFSET` with TREE 1. Replaced with five fully
+independent constants, one per physical tree —
+`BACK_LEFT_CANOPY_OFFSET`/`BACK_RIGHT_CANOPY_OFFSET`/
+`FRONT_LEFT_CANOPY_OFFSET`/`CENTER_CANOPY_OFFSET`/`FRONT_RIGHT_CANOPY_OFFSET`,
+looked up by `TREE_LAYOUT` index via `CANOPY_OFFSET_BY_INDEX` — each a
+distinct `{x, y}` object so tuning one can never move another.
+`CENTER_CANOPY_OFFSET` preserves the prior center adjustment
+(`{x: 0, y: -10}`); the other four start at `{x: 0, y: 0}`. The offset is
+now also applied to that tree's fruit anchors (`canopyFruitOffsets` result),
+not just the canopy image — previously a canopy-only visual nudge could
+drift the canopy away from its own apples/hit-areas; now canopy and fruit
+move together by construction. Canopy display size bumped ~1.15x,
+`CANOPY_DISPLAY_W` 330 -> 380 (aspect ratio preserved, `CANOPY_DISPLAY_H`
+still derived), with fruit anchor spacing scaling naturally since it's
+already derived from this constant. The two `flip: true` entries (back-right
+/ TREE 5 / index 1, and center / TREE 2 / index 3) were removed — the new
+canopy art has directional sunlight, so flipping it read as contradictory
+lighting; no replacement mirroring introduced. Wind amplitude cut a further
+~20%: `CANOPY_SWAY_MAX_DEG` 2.175 -> 1.75, `CANOPY_DRIFT_MAX_PX` 3.75 -> 3.0,
+`FRUIT_SWAY_MAX_DEG` 3.15 -> 2.5 — same three constants as the prior sway
+retune, WindModel/timing/gust system untouched. `TREE_LAYOUT.x`/`groundY`,
+`canopyOffsetY`, the row nudges, the baked background, and depth
+ordering/trunk positions are all unchanged by this pass.
+
 **I. Future asset-generation requirements** — a canopy PNG must satisfy
 all of the following to drop in cleanly later:
 - Transparent PNG (alpha channel); leaf mass + optional fine twig/branch
@@ -632,6 +660,74 @@ all of the following to drop in cleanly later:
 - Legible at the smallest supported CrazyGames scale-down — the whole
   canvas scales uniformly via `Phaser.Scale.FIT` (no separate low-res
   variant needed), so this is a visual-clarity check, not a second asset.
+
+## Orchard Fruit-Slot Presentation (EMPTY -> BAGGED -> RIPE)
+
+**Implemented.** Each of the 15 physical fruit slots now visually cycles
+through three presentation stages instead of only ever being hidden or
+showing the final ripe apple — purely a presentation layer in
+`render/OrchardTreeLayer.ts` (`FruitStage`, `FruitSlot.snapToStage`/
+`growInto`, `OrchardTreeLayer.stageForSlot`) built entirely on top of the
+EXISTING `FieldFruitSlot` state (`active`/`ripe`/`timer`) — it never changes
+actual regrowth duration, Yield/active-slot-count, or any other gameplay
+number:
+
+- **EMPTY** — nothing shown, not harvestable. Used both for a slot outside
+  the current Yield-active set (`!active`, unchanged from before) and for
+  the first `GROW_EMPTY_FRACTION` (12%, within the requested 10-15% band)
+  of an active-and-growing slot's own regrow window.
+- **BAGGED** — the new neutral bagged/growing art
+  (`ORCHARD_APPLE_BAGGED_KEY` / `assets/apples/orchard_apple_bagged.png`,
+  loaded in `MainScene.preload()` the same way every other Orchard asset
+  is), shown for the remaining ~88% of the regrow window. Same fruit
+  anchor/size/pivot as the ripe apple (so it inherits the same
+  tree/windPivot sway for free), never redrawn per-variety (bag art is
+  fixed/neutral), and not harvestable — `revealed` only ever becomes true
+  once a slot reaches RIPE.
+- **RIPE** — unchanged: the existing `AppleVisual` system draws the correct
+  variety/specimen illustration, harvestable exactly as before.
+
+The regrow window's own total duration isn't separately tracked anywhere in
+`GameState` (only the live countdown `timer` is) — `stageForSlot()` infers
+it purely for presentation, per slot, by remembering the timer's own value
+the first time that slot is observed actively growing after a reset (timer
+only ever counts DOWN within one cycle, so a timer that reads HIGHER than
+the last-remembered total means a new cycle just started). This is a
+best-effort estimate good enough for a visual split, not a second source of
+truth — it can be very slightly off immediately after a slot is rotated
+back into the active set with a freshly-rolled (±20% variance) duration,
+self-corrects every cycle, and never influences the actual `timer`
+countdown or ripening moment itself.
+
+**Harvest-disappear visual-identity fix.** Root cause of the "briefly shows
+a different apple mid-disappear" bug: `Game.harvestFruitSlot()` mutates the
+slot's state (clearing `specimen`, and — when Yield is maxed at 100, the
+only case with zero other dormant slots to rotate in, see
+`pickNextProductiveSlot`'s documented same-slot fallback — immediately
+re-arming that SAME slot with a fresh regrow timer) synchronously, before
+the click's own ~200ms shrink/fade pop tween finishes playing. Since
+`OrchardTreeLayer.sync()` runs every frame independent of that tween, its
+per-slot identity-redraw block could see the now-changed state and redraw
+the slot's texture (or, after this pass, its EMPTY/BAGGED/RIPE stage)
+*while the old apple was still visibly shrinking* — swapping what's on
+screen out from under an animation that's supposed to be showing one frozen
+apple. Fixed with `FruitSlot.isPoppingOut()`: true from the instant a
+harvest is accepted until the pop tween's own `onComplete`; `sync()` now
+skips a slot ENTIRELY (both the identity redraw and the stage transition)
+for as long as that's true, so the exact apple/size the player clicked
+stays visually frozen for the whole animation, and the slot only starts
+reflecting its new EMPTY/BAGGED/RIPE state once fully hidden. The
+Exceptional ring/glints need no separate handling — they're children of the
+same pivot the pop tween scales/fades, so they already disappear together
+with the harvested fruit.
+
+Verification: existing gameplay-facing suites
+(`scripts/verify-shipping-infrastructure.ts`, `verify-freshness.ts`,
+`verify-specimens.ts`, `verify-onboarding.ts`, `verify-orchard-wind.ts`, and
+the rest) all re-run green — none of this touched `Game.ts`,
+`systems/economy.ts`, or `types.ts`. The stage/animation/freeze behavior
+itself is Phaser-rendered and needs human browser verification (see the
+implementation report).
 
 ## Shipping Pipeline
 
