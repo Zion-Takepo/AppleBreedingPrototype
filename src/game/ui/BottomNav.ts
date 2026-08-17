@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
 import { LAYOUT, ORCHARD, THEME } from './theme.ts';
-import { text as mkText } from './uiKit.ts';
+import { orchardFrame, text as mkText } from './uiKit.ts';
 
 export type ScreenId = 'ORCHARD' | 'BREED' | 'CALENDAR' | 'COLLECTION';
 
@@ -23,8 +23,14 @@ const BREED_TAB_INDEX = 1;
 // horizontal breathing room on both sides.
 const BAR_W = 900;
 const BAR_X = (LAYOUT.width - BAR_W) / 2;
-const BAR_Y = 8;
-const BAR_H = LAYOUT.navHeight - BAR_Y * 2;
+// Styling pass (see PROJECT.md "Orchard UI Final Structure + Styling Pass"
+// section 8 "BOTTOM NAV"): the visible bar sits lower and thinner within its
+// existing reserved LAYOUT.navHeight band than before — this only moves the
+// bar's own paint/hit-test inside that already-allocated space, it does not
+// change LAYOUT.navHeight/contentBottom, so every other screen's content
+// area is unaffected.
+const BAR_Y = 20;
+const BAR_H = 60;
 const BAR_RADIUS = 16;
 const TAB_W = BAR_W / TABS.length;
 const TAB_INSET = 4; // active-tab highlight inset from the segment edges
@@ -61,13 +67,10 @@ export class BottomNav extends Phaser.GameObjects.Container {
     this.game = game;
     this.onSelect = onSelect;
 
-    // Shell: one rounded deep-forest bar with a thin gold outline, behind
-    // every tab's own per-segment highlight graphics.
-    const shell = scene.add.graphics();
-    shell.fillStyle(ORCHARD.forestDeep, 1);
-    shell.fillRoundedRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_RADIUS);
-    shell.lineStyle(2, ORCHARD.gold, 0.6);
-    shell.strokeRoundedRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_RADIUS);
+    // Shell: one rounded deep-forest bar with a thin gold outer outline plus
+    // a subtle inset inner line (see uiKit.ts orchardFrame), behind every
+    // tab's own per-segment highlight graphics.
+    const shell = orchardFrame(scene, BAR_X, BAR_Y, BAR_W, BAR_H, { radius: BAR_RADIUS, outerAlpha: 0.6, innerAlpha: 0.16 });
     this.add(shell);
 
     TABS.forEach((tab, i) => {
@@ -199,6 +202,8 @@ export class BottomNav extends Phaser.GameObjects.Container {
         const x = BAR_X + i * TAB_W;
         g.fillStyle(ORCHARD.forestMid, 1);
         g.fillRoundedRect(x + TAB_INSET, BAR_Y + TAB_INSET, TAB_W - TAB_INSET * 2, BAR_H - TAB_INSET * 2, 12);
+        g.lineStyle(1.5, ORCHARD.gold, 0.5);
+        g.strokeRoundedRect(x + TAB_INSET, BAR_Y + TAB_INSET, TAB_W - TAB_INSET * 2, BAR_H - TAB_INSET * 2, 12);
         g.fillStyle(THEME.gold, 1);
         g.fillRoundedRect(x + TAB_INSET + 10, BAR_Y + BAR_H - TAB_INSET - 5, TAB_W - TAB_INSET * 2 - 20, 3, 2);
       }

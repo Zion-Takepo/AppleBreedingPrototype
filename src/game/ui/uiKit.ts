@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { THEME } from './theme.ts';
+import { ORCHARD, THEME } from './theme.ts';
 
 export class Button extends Phaser.GameObjects.Container {
   private bg: Phaser.GameObjects.Graphics;
@@ -190,6 +190,55 @@ export class ProgressBar extends Phaser.GameObjects.Container {
       this.fill.fillRoundedRect(0, 0, w, this.boxH, this.boxH / 2);
     }
   }
+}
+
+/**
+ * Shared Orchard frame language (see PROJECT.md "Orchard UI Final Structure
+ * + Styling Pass" section 9 "FRAME LANGUAGE") — a filled rounded rect, a
+ * thin outer antique-gold stroke, and an optional thin inset inner line.
+ * Reused by HUD cards, Bottom Nav's shell, and OrchardScreen's Field pill/
+ * dropdown/Stats/Action cards so every Orchard surface reads as one
+ * consistent chrome system instead of ad hoc per-screen borders.
+ */
+export function orchardFrame(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  opts: {
+    fill?: number;
+    fillAlpha?: number;
+    radius?: number;
+    outerColor?: number;
+    outerAlpha?: number;
+    inner?: boolean;
+    innerColor?: number;
+    innerAlpha?: number;
+    innerInset?: number;
+  } = {},
+): Phaser.GameObjects.Graphics {
+  const {
+    fill = ORCHARD.forestDeep,
+    fillAlpha = 1,
+    radius = 14,
+    outerColor = ORCHARD.gold,
+    outerAlpha = 0.7,
+    inner = true,
+    innerColor = ORCHARD.gold,
+    innerAlpha = 0.22,
+    innerInset = 4,
+  } = opts;
+  const g = scene.add.graphics();
+  g.fillStyle(fill, fillAlpha);
+  g.fillRoundedRect(x, y, w, h, radius);
+  g.lineStyle(1.5, outerColor, outerAlpha);
+  g.strokeRoundedRect(x, y, w, h, radius);
+  if (inner && w > innerInset * 4 && h > innerInset * 4) {
+    g.lineStyle(1, innerColor, innerAlpha);
+    g.strokeRoundedRect(x + innerInset, y + innerInset, w - innerInset * 2, h - innerInset * 2, Math.max(2, radius - innerInset));
+  }
+  return g;
 }
 
 export function panel(

@@ -59,12 +59,20 @@ export const THEME = {
 // does not restyle. Used by the shared always-visible chrome this pass DOES
 // target (HUD, BottomNav) and by OrchardScreen's own cards.
 export const ORCHARD = {
-  forestDeep: 0x1c3320,
-  forestMid: 0x47703a,
-  cream: 0xf5efd4,
-  creamStr: '#f5efd4',
-  gold: 0xcc9c3c,
-  goldStr: '#cc9c3c',
-  textDark: '#29301e',
-  textWarmLight: '#eee8cd',
+  forestDeep: 0x17351f,
+  forestMid: 0x3f6a39,
+  cream: 0xf4eed6,
+  creamStr: '#f4eed6',
+  // Secondary cream tone for controls deliberately subordinate to the
+  // primary deep-forest/gold actions (e.g. CHANGE VARIETY, unselected
+  // Cultivation segments) — see PROJECT.md "Orchard UI Final Structure +
+  // Styling Pass" gold-usage rule: gold is an accent, not a general fill.
+  mutedCream: 0xded5af,
+  mutedCreamStr: '#ded5af',
+  gold: 0xc7a24a,
+  goldStr: '#c7a24a',
+  goldHighlight: 0xe1c56a,
+  goldHighlightStr: '#e1c56a',
+  textDark: '#2c321f',
+  textWarmLight: '#f2e9cc',
 };

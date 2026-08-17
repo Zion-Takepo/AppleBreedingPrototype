@@ -8,7 +8,7 @@ import { formatMarketPct, strongestMover } from '../systems/market.ts';
 import { openMarketOverview } from './MarketScreen.ts';
 import { openContestInfoModal } from './ContestInfoModal.ts';
 import { LAYOUT, ORCHARD, THEME } from './theme.ts';
-import { Button, formatMoney, text as mkText } from './uiKit.ts';
+import { Button, formatMoney, orchardFrame, text as mkText } from './uiKit.ts';
 
 // Orchard UI redesign (see PROJECT.md "Orchard UI redesign"): the top HUD is
 // several independent deep-forest cards with visible gaps between them —
@@ -37,14 +37,9 @@ const SHIPMENT_FEEDBACK_Y = CARD_Y + CARD_H + 6;
 const SHIPMENT_FEEDBACK_RISE_PX = 14;
 const SHIPMENT_FEEDBACK_DURATION_MS = 700;
 
-/** Draws one deep-forest card shell with a thin, restrained gold border. */
+/** Draws one deep-forest card shell with a thin gold outer stroke plus a subtle inset inner line (see uiKit.ts orchardFrame). */
 function drawCard(scene: Phaser.Scene, x: number, w: number): Phaser.GameObjects.Graphics {
-  const g = scene.add.graphics();
-  g.fillStyle(ORCHARD.forestDeep, 1);
-  g.fillRoundedRect(x, CARD_Y, w, CARD_H, CARD_RADIUS);
-  g.lineStyle(1.5, ORCHARD.gold, 0.55);
-  g.strokeRoundedRect(x, CARD_Y, w, CARD_H, CARD_RADIUS);
-  return g;
+  return orchardFrame(scene, x, CARD_Y, w, CARD_H, { radius: CARD_RADIUS, outerAlpha: 0.55, innerAlpha: 0.18 });
 }
 
 function microLabel(scene: Phaser.Scene, x: number, str: string): Phaser.GameObjects.Text {
