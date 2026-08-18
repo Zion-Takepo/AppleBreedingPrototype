@@ -64,18 +64,31 @@ export function renderLineDetail(
   container.add(mkText(scene, textX, y + 74, `Gen ${line.generation}`, 22, THEME.textMid, false, true));
 
   let extraY = y + 108;
-  // Rare/Epic Lines grow ordinary baseVisualId fruit, not their special
-  // identity Visual (see PROJECT.md "Revise Rare / Epic Line behavior") —
-  // a short explanatory block so this doesn't read as a bug when the
-  // player plants one and sees ordinary fruit on the tree.
+  // Rare/Epic Signature Fruit (see PROJECT.md "Line Affinity System"): this
+  // Line does NOT guarantee its Signature as ordinary crop — every fruit
+  // still rolls GLOBAL rarity first; the Signature is only favored WITHIN
+  // that rarity once it naturally occurs. A short explanatory block so this
+  // reads as the intended design, not a bug, when the player sees ordinary
+  // Common fruit on a Rare/Epic-signature Line's tree.
   if (rarity !== 'COMMON') {
-    const multiplier = rarity === 'RARE' ? TUNING.RARE_MUTATION_AFFINITY_MULTIPLIER : TUNING.EPIC_MUTATION_AFFINITY_MULTIPLIER;
-    container.add(mkText(scene, textX, extraY, `SPECIAL LINEAGE · ${catalogLabel(line.visualId)}`, 18, '#8a6d1a', true));
+    container.add(mkText(scene, textX, extraY, `SIGNATURE FRUIT · ${rarity} · AFFINITY ×${TUNING.LINE_SIGNATURE_AFFINITY_WEIGHT}`, 18, '#8a6d1a', true));
     extraY += 25;
-    container.add(mkText(scene, textX, extraY, `Stable Fruit: ${catalogLabel(line.baseVisualId)}`, 18, THEME.textMid));
-    extraY += 24;
-    container.add(mkText(scene, textX, extraY, `Mutation Affinity: ×${multiplier}`, 18, THEME.textMid));
-    extraY += 24;
+    if (line.baseVisualId !== line.visualId) {
+      container.add(mkText(scene, textX, extraY, `Common Tendency: ${catalogLabel(line.baseVisualId)} · ×${TUNING.LINE_COMMON_TENDENCY_WEIGHT}`, 18, THEME.textMid));
+      extraY += 24;
+    }
+    const rarityLower = rarity.charAt(0) + rarity.slice(1).toLowerCase();
+    const noteText = mkText(
+      scene,
+      textX,
+      extraY,
+      `Rarity odds stay global. When a ${rarityLower} fruit appears, this Line favors ${line.customName}.`,
+      14,
+      THEME.textMid,
+    );
+    noteText.setWordWrapWidth(Math.max(w - appleSizePx - 24 - 20, 200), true);
+    container.add(noteText);
+    extraY += noteText.height + 8;
   }
 
   if (opts.pairingWithLabel) {

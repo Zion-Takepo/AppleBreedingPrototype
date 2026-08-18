@@ -216,7 +216,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
 
   // Pricing sanity: value used for capacity math still comes from the
   // shared priceHarvestedApple path, never a second pricing formula.
-  const { value } = priceHarvestedApple(variety, field, game.state);
+  const { value } = priceHarvestedApple(variety, field, game.state, variety.baseVisualId);
   assert('queued items use the shared priceHarvestedApple pricing path', game.state.processingQueue.every((item) => Math.abs(item.value - value) < 1e-6 || item.fieldId !== field.id));
 }
 
@@ -491,7 +491,7 @@ function pushDummyQueueItems(state: GameState, count: number, value = 3): void {
   // NEW rate, not any value implicitly computed back on the Closing day.
   const variety = game.getVariety(field.varietyId)!;
   game.state.visualMarket[variety.baseVisualId].pct = 0.5;
-  const expected = priceHarvestedApple(variety, field, game.state);
+  const expected = priceHarvestedApple(variety, field, game.state, variety.baseVisualId);
   game.harvestFruitSlot(field.id, overflowSlot);
   const queued = game.state.processingQueue[game.state.processingQueue.length - 1];
   assert('carryover fruit is priced at CURRENT (post-Closing) Market rate when actually harvested', Math.abs(queued.value - expected.value) < 1e-6);

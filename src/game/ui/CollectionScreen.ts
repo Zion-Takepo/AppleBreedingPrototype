@@ -1,11 +1,12 @@
 import Phaser from 'phaser';
 import type { Game } from '../Game.ts';
 import type { Variety } from '../types.ts';
-import { COLORS, PATTERNS } from '../tuning.ts';
+import { COLORS, PATTERNS, TUNING } from '../tuning.ts';
 import { AppleVisual } from '../render/AppleVisual.ts';
-import { APPLE_RARITY } from '../render/appleAssets.ts';
+import { APPLE_RARITY, catalogLabel } from '../render/appleAssets.ts';
 import { LAYOUT, THEME } from './theme.ts';
 import { Button, panel, text as mkText } from './uiKit.ts';
+import { commonTendencyConditionalPct, signatureConditionalPct } from '../systems/lineAffinity.ts';
 
 // The variety-detail illustration is one of the main rewards of opening an
 // entry, so it's shown substantially larger than elsewhere.
@@ -37,10 +38,11 @@ export class CollectionScreen extends Phaser.GameObjects.Container {
 
   private drawTabs(): void {
     const tabs: Tab[] = ['TRAITS', 'VARIETIES'];
+    const tabLabel: Record<Tab, string> = { TRAITS: 'TRAITS', VARIETIES: 'LINES' };
     tabs.forEach((t, i) => {
       const x = 24 + i * 260;
       const active = this.tab === t;
-      const btn = new Button(this.scene, x + 120, 40, 240, 56, t, () => {
+      const btn = new Button(this.scene, x + 120, 40, 240, 56, tabLabel[t], () => {
         this.tab = t;
         this.render();
       }, active ? THEME.accent : 0x8a8570, 24);
@@ -148,11 +150,38 @@ export class CollectionScreen extends Phaser.GameObjects.Container {
     this.content.add(mkText(this.scene, x + 260, y0 + 32, v.customName, 34, THEME.textDark, true));
     this.content.add(mkText(this.scene, x + 260, y0 + 84, `Generation ${v.generation}  •  Created Day ${v.createdDay}`, 22, THEME.textMid, false, true));
     this.content.add(mkText(this.scene, x + 260, y0 + 120, `${v.color} / ${v.pattern}`, 22, THEME.textMid));
-    this.content.add(mkText(this.scene, x + 260, y0 + 148, `Rarity: ${rarity}`, 22, rarityColor, rarity !== 'COMMON'));
+    // "SIGNATURE FRUIT" — see PROJECT.md "Line Affinity System": this large
+    // apple is the fruit identity this Line has the strongest genetic
+    // affinity for, never a guarantee that every apple looks like this.
+    this.content.add(mkText(this.scene, x + 260, y0 + 148, `SIGNATURE FRUIT · ${rarity}`, 22, rarityColor, rarity !== 'COMMON'));
 
-    this.content.add(mkText(this.scene, x + 260, y0 + 208, `Sweetness  ${v.sweetness}`, 26, THEME.textDark, false, true));
-    this.content.add(mkText(this.scene, x + 260, y0 + 244, `Size            ${v.size}`, 26, THEME.textDark, false, true));
-    this.content.add(mkText(this.scene, x + 260, y0 + 280, `Yield           ${v.yieldStat}`, 26, THEME.textDark, false, true));
+    let statsY = y0 + 208;
+    if (rarity !== 'COMMON') {
+      const day = this.game.state.day;
+      const sigPct = Math.round(signatureConditionalPct(v.visualId, day) * 100);
+      this.content.add(
+        mkText(this.scene, x + 260, statsY, `AFFINITY ×${TUNING.LINE_SIGNATURE_AFFINITY_WEIGHT} (${sigPct}% of ${rarity.toLowerCase()} fruit)`, 18, THEME.textMid),
+      );
+      statsY += 28;
+      if (v.baseVisualId !== v.visualId) {
+        const commonPct = Math.round(commonTendencyConditionalPct(day) * 100);
+        this.content.add(
+          mkText(
+            this.scene,
+            x + 260,
+            statsY,
+            `COMMON TENDENCY ${catalogLabel(v.baseVisualId)} ×${TUNING.LINE_COMMON_TENDENCY_WEIGHT} (${commonPct}% of common fruit)`,
+            16,
+            THEME.textMid,
+          ),
+        );
+        statsY += 24;
+      }
+    }
+
+    this.content.add(mkText(this.scene, x + 260, statsY, `Sweetness  ${v.sweetness}`, 26, THEME.textDark, false, true));
+    this.content.add(mkText(this.scene, x + 260, statsY + 36, `Size            ${v.size}`, 26, THEME.textDark, false, true));
+    this.content.add(mkText(this.scene, x + 260, statsY + 72, `Yield           ${v.yieldStat}`, 26, THEME.textDark, false, true));
 
     this.content.add(mkText(this.scene, x + 32, y0 + 352, 'Awards:', 24, THEME.textDark, true));
     if (v.awards.length === 0) {

@@ -3,6 +3,12 @@ import type { Game } from '../Game.ts';
 import { LAYOUT, ORCHARD, THEME } from './theme.ts';
 import { orchardFrame, text as mkText } from './uiKit.ts';
 
+// Orchard typography pass: bottom-nav tab labels (ORCHARD/BREED/CALENDAR/
+// COLLECTION) are "major section/action labels" — Cormorant Garamond, on the
+// bar's dark-green ground (both active and inactive segments), so the
+// subtle dark-panel shadow applies unconditionally.
+const TAB_LABEL_FONT_SIZE = 22;
+
 export type ScreenId = 'ORCHARD' | 'BREED' | 'CALENDAR' | 'COLLECTION';
 
 const TABS: { id: ScreenId; label: string }[] = [
@@ -79,7 +85,7 @@ export class BottomNav extends Phaser.GameObjects.Container {
       this.add(g);
       this.tabGfx.push(g);
 
-      const label = mkText(scene, x + TAB_W / 2, BAR_Y + BAR_H / 2, tab.label, 21, ORCHARD.textWarmLight, true).setOrigin(0.5);
+      const label = mkText(scene, x + TAB_W / 2, BAR_Y + BAR_H / 2, tab.label, TAB_LABEL_FONT_SIZE, ORCHARD.textWarmLight, true, false, ORCHARD.fontDisplay, true).setOrigin(0.5);
       this.add(label);
       this.tabLabels.push(label);
 

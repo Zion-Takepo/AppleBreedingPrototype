@@ -1,6 +1,7 @@
 import type { AppleColor, ApplePattern, ContestType } from './tuning.ts';
 import type { AppleAssetId } from './render/appleAssets.ts';
 import type { ExceptionalArchetype, StatKey } from './systems/exceptional.ts';
+import type { FirstRareProtectionState } from './systems/fieldRarityModel.ts';
 
 export type CultivationPolicy = 'NORMAL' | 'SWEETEN' | 'GROW_BIG';
 
@@ -37,19 +38,27 @@ export interface Variety {
   // Rarity itself is never stored — always derived from this via
   // APPLE_RARITY to avoid a second source of truth.
   //
-  // `visualId` is the Line's IDENTITY visual (its special lineage — what
-  // it's shown as in the Library/Market/Collection, and what OWNED is
-  // derived from). `baseVisualId` is the Common Visual it stably PRODUCES
-  // as ordinary Orchard fruit and what ordinary sale pricing uses (see
-  // PROJECT.md "Revise Rare / Epic Line behavior"). For a Common Line
-  // (#001-#004) the two are always identical — Common Visuals are stable
-  // cultivars. For a Rare/Epic Line, `baseVisualId` is always a Common id,
-  // inherited unchanged through breeding from whichever parent contributed
-  // the special `visualId` — planting a Rare/Epic Line grows ordinary
-  // `baseVisualId` fruit, with the Line's own Mutation Affinity (see
-  // systems/specimen.ts) making its special `visualId` more likely to
-  // recur as a physical Orchard Specimen, never as guaranteed mass
-  // production.
+  // LINE AFFINITY SYSTEM (see PROJECT.md "Line Affinity System" and
+  // systems/lineAffinity.ts) — a Line does NOT guarantee one apple
+  // appearance. Every fruit independently rolls GLOBAL Common/Rare/Epic
+  // rarity first (the Line never changes those odds); only AFTER a rarity
+  // tier is rolled does the Line bias WHICH visual within that tier is
+  // picked. `visualId` is the Line's SIGNATURE FRUIT — the fruit identity
+  // it has the strongest genetic affinity for, shown as its identity in
+  // Library/Market/Collection (and what OWNED is derived from): when the
+  // rolled rarity matches the Signature's own rarity, the Signature gets
+  // `TUNING.LINE_SIGNATURE_AFFINITY_WEIGHT` (×3) weight among that tier's
+  // candidates, never a change to the tier-roll odds themselves.
+  // `baseVisualId` is the Line's COMMON TENDENCY — the Common (#001-#004)
+  // visual that tends to occur more often in this Line's everyday crop:
+  // when COMMON is rolled, it gets `TUNING.LINE_COMMON_TENDENCY_WEIGHT`
+  // (×2) weight among the four Common candidates. For a Common-signature
+  // Line (#001-#004) the two are always identical. For a Rare/Epic-
+  // signature Line, `baseVisualId` is always a Common id, inherited
+  // unchanged through breeding from whichever parent contributed the
+  // special `visualId` — planting a Rare/Epic-signature Line does NOT turn
+  // the orchard into a Rare/Epic farm; it only makes that Signature more
+  // likely to appear WHEN its rarity naturally occurs.
   visualId: AppleAssetId;
   baseVisualId: AppleAssetId;
   favorite: boolean;
@@ -70,9 +79,27 @@ export interface FieldFruitSlot {
   // Set the instant this fruit becomes a special mutation fruit — generated
   // when the slot's timer completes (becomes ripe), never later at harvest
   // time, so save/reload can never reroll it (see systems/specimen.ts and
-  // Game.maybeGenerateRandomSpecimen/spawnGuaranteedSpecimen). Null for an
+  // Game.spawnGuaranteedSpecimen/rollFruitOutcomeForSlot). Null for an
   // ordinary fruit slot, growing or ripe.
   specimen: BreedingSpecimen | null;
+  // The persisted outcome of the live Field Rarity Model V2's Stage B roll
+  // (see PROJECT.md "Field Rarity + Line Affinity Probability Model V2" and
+  // systems/fieldRarityModel.ts) for an ORDINARY (non-Specimen) ripe fruit —
+  // one of the planted Line's day-unlocked Common visuals (C1-C4), weighted
+  // toward `baseVisualId` (the Line's Common Tendency). Rolled once, the
+  // instant this slot becomes ripe (same moment `specimen` is decided — see
+  // Game.rollFruitOutcomeForSlot), and persists until harvest; never
+  // re-rolled by render/sync/save-reload. Null while growing/inactive, or
+  // whenever `specimen` is set instead (a Rare/Epic-tier roll always
+  // becomes a Specimen, never a plain ordinary fruit) — OrchardTreeLayer
+  // falls back to the planted Line's own `baseVisualId` whenever this is
+  // null, which also covers every fruit ripened before Day
+  // `TUNING.SPECIMEN_RANDOM_START_DAY` (no roll happens that early, exactly
+  // like before this pass). This is the fruit slot's authoritative rolled
+  // visual identity — RIPE ordinary-fruit rendering/pricing must always read
+  // this (falling back to `baseVisualId` only per the null cases above),
+  // never unconditionally `variety.visualId`/`variety.baseVisualId`.
+  commonVisualId: AppleAssetId | null;
 }
 
 // One physical, one-use special apple obtained from the Orchard (see
@@ -399,4 +426,13 @@ export interface GameState {
   // One-time-ever Market discoverability hint (see PROJECT.md "Market
   // discoverability") — never resets, shown at most once per save.
   marketHintShown: boolean;
+  // Field Rarity Model V2's one-time first-Rare discovery protection (see
+  // PROJECT.md "Field Rarity + Line Affinity Probability Model V2" and
+  // systems/fieldRarityModel.ts) — persisted so a reload can never reset the
+  // miss streak or reactivate protection after the player's first-ever Rare
+  // (Game.rollFruitOutcomeForSlot advances this via
+  // advanceFirstRareProtectionState on every Rare-eligible live roll; see
+  // systems/save.ts's migration for how an old save that already proves a
+  // Rare was found initializes this as permanently completed).
+  firstRareProtection: FirstRareProtectionState;
 }

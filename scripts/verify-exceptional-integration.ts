@@ -136,6 +136,17 @@ function advanceToDay(game: Game, targetDay: number): void {
 // below uses a different, deliberately discriminating focusRoll instead.
 const TRAIT_OUTLIER_QUEUE = [0.0, 0.1, 0.05, 0.5, 0.5];
 
+// At Day 3 (Rare unlocked Day 4, Epic Day 6), the Line Affinity System's
+// Stage A roll (rollGlobalRarity, see systems/lineAffinity.ts) ALWAYS
+// resolves to COMMON regardless of rng value — there is no more "the tier
+// roll misses" case to construct (Common is the deterministic complement of
+// Rare+Epic, not a separate probability-gated outcome). The two-stage roll
+// still unconditionally CONSUMES exactly 2 rng() calls before falling
+// through to maybeGenerateExceptionalSpecimen, though — these two
+// placeholder values exist purely to satisfy that consumption; their exact
+// values don't matter at Day 3.
+const DAY3_TIER_ROLL_PLACEHOLDER = [0.5, 0.5];
+
 function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   return {
     id: overrides.id ?? crypto.randomUUID(),
@@ -167,10 +178,10 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
 
   // No Exceptional on Day 1 or Day 2 — proven with rng pinned to a value
   // that would trivially pass every downstream chance check if the day
-  // gate didn't short-circuit first (rollSpecimenTier checks its own
-  // `day < SPECIMEN_RANDOM_START_DAY`; maybeGenerateExceptionalSpecimen
-  // checks its own, separate `day < EXCEPTIONAL_START_DAY` — see the
-  // decoupling proof further below).
+  // gate didn't short-circuit first (rollFruitOutcomeForSlot checks its own
+  // `day >= SPECIMEN_RANDOM_START_DAY` before even running the two-stage
+  // roll; maybeGenerateExceptionalSpecimen checks its own, separate
+  // `day < EXCEPTIONAL_START_DAY` — see the decoupling proof further below).
   {
     clearStorage();
     const game = new Game();
@@ -199,35 +210,44 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
     const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
     field.slots[targetIdx].ripe = false;
     field.slots[targetIdx].timer = 0.0001;
-    // Tier roll must miss (>= commonP) so the Exceptional branch is even
-    // reached; occurrence/archetype/focus rolls all pinned to succeed.
-    withQueuedRandom([0.999, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
+    // At Day 3 the two-stage roll always resolves to COMMON (see
+    // DAY3_TIER_ROLL_PLACEHOLDER above), so it always falls through to the
+    // Exceptional branch; occurrence/archetype/focus rolls all pinned to succeed.
+    withQueuedRandom([...DAY3_TIER_ROLL_PLACEHOLDER, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
     assert('Day 3+: an ordinary ripening fruit CAN become a Genetic Exceptional Specimen', field.slots[targetIdx].specimen?.exceptionalArchetype === 'TRAIT_OUTLIER');
   }
 
-  // Existing Visual Mutation Specimen wins priority — tier roll pinned to
-  // always succeed (COMMON), so the Exceptional branch must never even run.
+  // A Rare/Epic-tier fruit-outcome roll wins priority over Exceptional — the
+  // two-stage roll's own early `return` (see Game.ts's rollFruitOutcomeForSlot)
+  // means maybeGenerateExceptionalSpecimen is never even reached for a fruit
+  // that already became a physical Specimen this way. Under the new Line
+  // Affinity System, COMMON tier NEVER produces a Specimen object anymore
+  // (only `slot.commonVisualId` on ordinary fruit) — the old "Common
+  // Specimen" mechanic this test used to exercise no longer exists — so this
+  // now uses Day 4 (Rare unlocked) with rng pinned to 0, which deterministically
+  // resolves Stage A to RARE (0 < TUNING.SPECIMEN_RARE_CHANCE) and Stage B to
+  // the pool's first candidate.
   {
     clearStorage();
     const game = new Game();
-    advanceToDay(game, 3);
+    advanceToDay(game, 4);
     const field = game.state.fields[0] as Field;
     const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
     field.slots[targetIdx].ripe = false;
     field.slots[targetIdx].timer = 0.0001;
     withConstantRandom(0, () => game.update(0.001)); // 0 < every threshold this path can hit
     const specimen = field.slots[targetIdx].specimen;
-    assert('setup sanity: the tier roll actually produced a Visual Mutation specimen', !!specimen);
-    assert('a fruit that already produced a Visual Mutation Specimen never also carries Exceptional metadata', specimen?.exceptionalArchetype === undefined);
+    assert('setup sanity: the two-stage roll actually produced a Rare/Epic-tier Specimen', !!specimen);
+    assert('a fruit that already produced a Rare/Epic-tier Specimen never also carries Exceptional metadata', specimen?.exceptionalArchetype === undefined);
     assert(
-      'the Visual Mutation specimen shows a DIFFERENT visual than the source Line (proof it took the Visual Mutation branch, not a coincidentally-null Exceptional one)',
+      'the Rare/Epic-tier Specimen shows a visual from a different rarity tier than the source Line (proof it took the two-stage-roll branch, not a coincidentally-null Exceptional one)',
       specimen?.visualId !== game.getVariety(field.varietyId!)?.baseVisualId,
     );
   }
 
   // One fruit cannot contain both types — structural: a single FieldFruitSlot
   // has exactly one `specimen` reference, and the function above returns
-  // immediately once either branch assigns it (see maybeGenerateRandomSpecimen).
+  // immediately once either branch assigns it (see Game.ts's rollFruitOutcomeForSlot).
   // The two checks above (priority test's exceptionalArchetype===undefined,
   // and the Day-3+ eligible test's exceptionalArchetype==='TRAIT_OUTLIER' with
   // a visualId equal to the source's own base — see IDENTITY section) already
@@ -249,12 +269,12 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
 
     const mutableTuning = TUNING as unknown as { SPECIMEN_RANDOM_START_DAY: number };
     const originalSpecimenStartDay = mutableTuning.SPECIMEN_RANDOM_START_DAY;
-    mutableTuning.SPECIMEN_RANDOM_START_DAY = 99; // Visual Mutation's own gate now structurally can't fire on Day 3 at all
+    mutableTuning.SPECIMEN_RANDOM_START_DAY = 99; // the two-stage roll's own gate now structurally can't fire on Day 3 at all
     try {
-      // With the Visual Mutation gate pushed out, rollSpecimenTier's own
-      // day-check short-circuits before consuming any rng at all, so the
+      // With the two-stage-roll gate pushed out, rollFruitOutcomeForSlot's
+      // own day-check short-circuits before consuming any rng at all, so the
       // queue starts directly at the Exceptional occurrence roll (no
-      // leading tier-miss value needed here, unlike the Day-3+ test above).
+      // leading placeholder values needed here, unlike the Day-3+ test above).
       withQueuedRandom(TRAIT_OUTLIER_QUEUE, () => game.update(0.001));
     } finally {
       mutableTuning.SPECIMEN_RANDOM_START_DAY = originalSpecimenStartDay;
@@ -374,7 +394,7 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
   field.slots[targetIdx].ripe = false;
   field.slots[targetIdx].timer = 0.0001;
-  withQueuedRandom([0.999, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
+  withQueuedRandom([...DAY3_TIER_ROLL_PLACEHOLDER, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
   const before = JSON.parse(JSON.stringify(field.slots[targetIdx].specimen));
   assert('setup sanity: specimen is created exactly at ripening', before.exceptionalArchetype === 'TRAIT_OUTLIER');
 
@@ -397,7 +417,7 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
   field.slots[targetIdx].ripe = false;
   field.slots[targetIdx].timer = 0.0001;
-  withQueuedRandom([0.999, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
+  withQueuedRandom([...DAY3_TIER_ROLL_PLACEHOLDER, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
   const exceptionalId = field.slots[targetIdx].specimen!.id;
 
   const cashBefore = game.state.cash;
@@ -421,7 +441,7 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
   field.slots[targetIdx].ripe = false;
   field.slots[targetIdx].timer = 0.0001;
-  withQueuedRandom([0.999, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
+  withQueuedRandom([...DAY3_TIER_ROLL_PLACEHOLDER, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
   assert('setup sanity: an Exceptional Specimen is ripe on the tree', field.slots[targetIdx].specimen?.exceptionalArchetype === 'TRAIT_OUTLIER');
 
   // Deterministically force one ORDINARY (non-specimen) slot ripe too —
@@ -457,7 +477,7 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
   field.slots[targetIdx].ripe = false;
   field.slots[targetIdx].timer = 0.0001;
-  withQueuedRandom([0.999, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
+  withQueuedRandom([...DAY3_TIER_ROLL_PLACEHOLDER, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
 
   // Deterministically force one ORDINARY ripe slot too — see the identical
   // technique/rationale in the PACKING FULL block above.
@@ -498,7 +518,7 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
   field.slots[targetIdx].ripe = false;
   field.slots[targetIdx].timer = 0.0001;
-  withQueuedRandom([0.999, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
+  withQueuedRandom([...DAY3_TIER_ROLL_PLACEHOLDER, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
   const exceptionalId = field.slots[targetIdx].specimen!.id;
   game.harvestFruitSlot(field.id, targetIdx);
   assert('setup sanity: the harvested Exceptional is held in the inventory', game.state.specimens.some((s) => s.id === exceptionalId));
@@ -518,7 +538,7 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
   const targetIdx2 = field2.slots.findIndex((s) => s.active && !s.specimen);
   field2.slots[targetIdx2].ripe = false;
   field2.slots[targetIdx2].timer = 0.0001;
-  withQueuedRandom([0.999, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
+  withQueuedRandom([...DAY3_TIER_ROLL_PLACEHOLDER, ...TRAIT_OUTLIER_QUEUE], () => game.update(0.001));
   const secondId = field2.slots[targetIdx2].specimen!.id;
   game.harvestFruitSlot(field2.id, targetIdx2);
   const rejectedOk = game.startBreeding({ kind: 'SPECIMEN', id: secondId }, { kind: 'SPECIMEN', id: secondId });
@@ -532,15 +552,18 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
 {
   clearStorage();
   const game = new Game();
-  advanceToDay(game, 3);
+  advanceToDay(game, 4); // Rare unlocked — see the "priority" test above for why Day 3 can no longer produce a Specimen at all
   const field = game.state.fields[0] as Field;
   const targetIdx = field.slots.findIndex((s) => s.active && !s.specimen);
   field.slots[targetIdx].ripe = false;
   field.slots[targetIdx].timer = 0.0001;
-  // A plain Visual Mutation specimen — never touched by this pass's fields.
+  // A plain Rare-tier Specimen (rng=0 deterministically resolves Stage A to
+  // RARE and Stage B to the pool's first candidate — see the "priority" test
+  // above) — never touched by this pass's fields, exactly the old-shaped
+  // "no Exceptional metadata" Specimen this migration test needs.
   withConstantRandom(0, () => game.update(0.001));
   const ordinarySpecimen = field.slots[targetIdx].specimen!;
-  assert('setup sanity: an ordinary Visual Mutation specimen was produced', ordinarySpecimen.exceptionalArchetype === undefined);
+  assert('setup sanity: an ordinary Rare-tier Specimen was produced', ordinarySpecimen.exceptionalArchetype === undefined);
 
   game.harvestFruitSlot(field.id, targetIdx);
   const beforeSave = JSON.parse(JSON.stringify(game.state.specimens.find((s) => s.id === ordinarySpecimen.id)));
@@ -559,7 +582,12 @@ function fakeVariety(overrides: Partial<Variety> = {}): Variety {
 // ===========================================================================
 {
   assert('STAT_KEYS is still the canonical 5-key order shared with the genetics core (no divergent local copy in Game.ts)', STAT_KEYS.length === 5 && STAT_KEYS[0] === 'sweetness' && STAT_KEYS[4] === 'freshness');
-  assert('existing Day-3+ Visual Mutation base rates are untouched by this pass (same TUNING constants, not redefined)', TUNING.SPECIMEN_COMMON_CHANCE === 0.003 && TUNING.SPECIMEN_RARE_CHANCE === 0.0005 && TUNING.SPECIMEN_EPIC_CHANCE === 0.00005);
+  // SPECIMEN_COMMON_CHANCE is vestigial under the Line Affinity System (no
+  // longer read by rollGlobalRarity — Common is now the complement of
+  // Rare+Epic, not its own probability-gated rate) but the constant itself
+  // is untouched, same value, same as SPECIMEN_RARE_CHANCE/EPIC_CHANCE
+  // (which ARE still actively read as the global Rare/Epic rates).
+  assert('existing Day-3+ base-rate TUNING constants are untouched by this pass (same values, not redefined)', TUNING.SPECIMEN_COMMON_CHANCE === 0.003 && TUNING.SPECIMEN_RARE_CHANCE === 0.0005 && TUNING.SPECIMEN_EPIC_CHANCE === 0.00005);
   assert('the existing Visual/Common/Rare/Epic Specimen start-day rule (SPECIMEN_RANDOM_START_DAY) is untouched by the EXCEPTIONAL_START_DAY split', TUNING.SPECIMEN_RANDOM_START_DAY === 3);
 }
 

@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { ORCHARD, THEME } from './theme.ts';
+import { DARK_PANEL_TEXT_SHADOW, ORCHARD, TEXT_RESOLUTION, THEME } from './theme.ts';
 
 export class Button extends Phaser.GameObjects.Container {
   private bg: Phaser.GameObjects.Graphics;
@@ -31,6 +31,16 @@ export class Button extends Phaser.GameObjects.Container {
     fontSize = 28,
     numeric = false,
     textColor = THEME.textLight,
+    // Optional override for the shared THEME.font/THEME.fontNumeric choice
+    // above — used by the Orchard typography pass (ORCHARD.fontDisplay/
+    // fontBody) so Orchard's own buttons (CHANGE LINE, HARVEST ALL,
+    // Cultivation) can use the local Cormorant Garamond/Libre Baskerville
+    // fonts without touching every other screen's Button call sites, which
+    // keep defaulting to THEME.font untouched.
+    fontFamily?: string,
+    // Opt-in very-subtle shadow for warm-cream text on dark-green fills —
+    // see DARK_PANEL_TEXT_SHADOW in theme.ts.
+    darkPanelShadow = false,
   ) {
     super(scene, x, y);
     this.boxW = w;
@@ -43,10 +53,12 @@ export class Button extends Phaser.GameObjects.Container {
     this.add(this.bg);
     this.label = scene.add
       .text(0, 0, text, {
-        fontFamily: numeric ? THEME.fontNumeric : THEME.font,
+        fontFamily: fontFamily ?? (numeric ? THEME.fontNumeric : THEME.font),
         fontSize: `${fontSize}px`,
         color: this.textColor,
         align: 'center',
+        resolution: TEXT_RESOLUTION,
+        shadow: darkPanelShadow ? DARK_PANEL_TEXT_SHADOW : undefined,
       })
       .setOrigin(0.5);
     this.add(this.label);
@@ -96,9 +108,18 @@ export class Button extends Phaser.GameObjects.Container {
     return this;
   }
 
-  setTextColor(color: string): this {
+  // `darkPanel` re-toggles the very-subtle shadow (see DARK_PANEL_TEXT_SHADOW)
+  // to match whichever fill this label now sits on — needed because some
+  // buttons (e.g. Cultivation's segmented control) swap between a dark-green
+  // active fill and a cream inactive fill at runtime via this same method.
+  setTextColor(color: string, darkPanel = false): this {
     this.textColor = color;
     this.label.setColor(color);
+    if (darkPanel) {
+      this.label.setShadow(DARK_PANEL_TEXT_SHADOW.offsetX, DARK_PANEL_TEXT_SHADOW.offsetY, DARK_PANEL_TEXT_SHADOW.color, DARK_PANEL_TEXT_SHADOW.blur, false, true);
+    } else {
+      this.label.setShadow(0, 0, '#000', 0, false, false);
+    }
     return this;
   }
 
@@ -268,12 +289,20 @@ export function text(
   color = THEME.textDark,
   bold = false,
   numeric = false,
+  // Optional override for the shared THEME.font/THEME.fontNumeric choice —
+  // see the matching Button constructor param doc comment above.
+  fontFamily?: string,
+  // Opt-in very-subtle shadow for warm-cream text on dark-green fills — see
+  // DARK_PANEL_TEXT_SHADOW in theme.ts / the matching Button param.
+  darkPanelShadow = false,
 ): Phaser.GameObjects.Text {
   return scene.add.text(x, y, str, {
-    fontFamily: numeric ? THEME.fontNumeric : THEME.font,
+    fontFamily: fontFamily ?? (numeric ? THEME.fontNumeric : THEME.font),
     fontSize: `${size}px`,
     color,
     fontStyle: bold ? 'bold' : 'normal',
+    resolution: TEXT_RESOLUTION,
+    shadow: darkPanelShadow ? DARK_PANEL_TEXT_SHADOW : undefined,
   });
 }
 

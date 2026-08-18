@@ -42,13 +42,17 @@ import { realizedShippingValue } from './systems/freshness.ts';
 import { dayTimeRemainingAtClock } from './systems/clock.ts';
 import { clearSave, loadState, saveState } from './systems/save.ts';
 import { freshStarterLines, STARTER_GREEN, STARTER_RED } from './systems/starterLines.ts';
+import { chooseDay2GuaranteedVisual, chooseGuaranteedSpecimenFieldIndex, deriveSpecimenBaseVisualId, generateSpecimenStats } from './systems/specimen.ts';
 import {
-  chooseDay2GuaranteedVisual,
-  chooseGuaranteedSpecimenFieldIndex,
-  deriveSpecimenBaseVisualId,
-  generateSpecimenStats,
-  rollOrchardSpecimen,
-} from './systems/specimen.ts';
+  INITIAL_FIRST_RARE_PROTECTION_STATE,
+  advanceFirstRareProtectionState,
+  getEffectiveRarityOdds,
+  getWithinTierVisualWeights,
+  isRareEligible,
+  rollRarity,
+  rollVisualWithinRarity,
+  tierPool,
+} from './systems/fieldRarityModel.ts';
 import { STAT_KEYS, generateExceptionalSpecimen, type StatSet } from './systems/exceptional.ts';
 import type { AppleAssetId } from './render/appleAssets.ts';
 
@@ -144,6 +148,7 @@ function createInitialState(): GameState {
     onboarding: { step: 'HARVEST_APPLE', dismissed: false },
     closingWarningShown: false,
     marketHintShown: false,
+    firstRareProtection: { ...INITIAL_FIRST_RARE_PROTECTION_STATE },
   };
 }
 
@@ -375,10 +380,11 @@ export class Game {
             if (slot.timer <= 0) {
               slot.ripe = true;
               changed = true;
-              // Day-3+ random Specimen appearance (see PROJECT.md section 4):
-              // rolled the instant this fruit becomes ripe, never later at
-              // harvest time, so save/reload can never reroll it.
-              if (sourceVariety) this.maybeGenerateRandomSpecimen(slot, sourceVariety, field.policy);
+              // Field Rarity Model V2's two-stage fruit-outcome roll (see
+              // PROJECT.md "Field Rarity + Line Affinity Probability Model
+              // V2"): rolled the instant this fruit becomes ripe, never
+              // later at harvest time, so save/reload can never reroll it.
+              if (sourceVariety) this.rollFruitOutcomeForSlot(field, slot, sourceVariety, field.policy);
             }
           }
         }
@@ -635,23 +641,94 @@ export class Game {
   }
 
   /**
-   * Day-3+ per-ripened-fruit random Specimen roll (see PROJECT.md section
-   * 4) — called the instant an ordinary fruit slot becomes ripe. Folds in
-   * the planted Line's own Rare/Epic Mutation Affinity, if any (see
-   * systems/specimen.ts rollOrchardSpecimen). Safe no-op (ordinary fruit)
-   * if nothing fires or no valid alternate Visual exists. The Genetic
-   * Exceptional roll (see maybeGenerateExceptionalSpecimen below) is only
-   * ever attempted when this existing Visual Mutation roll does NOT fire —
-   * a single fruit can never be both (see PROJECT.md "Exceptional Specimen
+   * Rewarded-ad rarity boost (see PROJECT.md "Field Rarity + Line Affinity
+   * Probability Model V2" section "FUTURE REWARDED AD") — always false in
+   * this pass; no ad SDK/UI exists yet. Kept as its own call (rather than a
+   * literal inlined at the roll site) so a later pass can wire real
+   * eligibility here without touching rollFruitOutcomeForSlot's own logic.
+   */
+  private rewardedRarityBoostActive(): boolean {
+    return false;
+  }
+
+  /**
+   * Field Rarity Model V2's Day-3+ two-stage fruit-outcome roll (see
+   * PROJECT.md "Field Rarity + Line Affinity Probability Model V2" and
+   * systems/fieldRarityModel.ts) — called the instant a fruit slot becomes
+   * ripe. Replaces the old lineAffinity.ts global day-gated roll as the
+   * LIVE Orchard fruit-generation path (see PROJECT.md "Canonical fruit
+   * generation order"); lineAffinity.ts itself is kept only because a few
+   * UI probability displays still read its ×3/×2 constants (out of scope
+   * for this pass — see that file's own updated header).
+   *
+   * STAGE A rolls Common/Rare/Epic using `field`'s OWN base odds
+   * (`getEffectiveRarityOdds(field.id, ...)` — `field.id` is already the
+   * Field Rarity Table's 1-based row index, see types.ts's `Field.id`),
+   * day-gated exactly like the old global roll (Rare/Epic zeroed before
+   * their own unlock day), with first-Rare protection consulted and then
+   * advanced via `GameState.firstRareProtection` on every Rare-ELIGIBLE
+   * roll (never before eligibility — see PROJECT.md's "ELIGIBLE MISS
+   * COUNTING"). `rewardedRarityBoostActive` is always false for now (see
+   * rewardedRarityBoostActive() above). The planted Line's own
+   * Signature/Common Tendency never reach this stage at all — they're only
+   * ever passed to Stage B below — so a Line structurally cannot move its
+   * own Rare/Epic odds (see PROJECT.md's rarity-invariance rule).
+   *
+   * STAGE B (`getWithinTierVisualWeights`/`rollVisualWithinRarity`) picks
+   * the specific visual within the already-decided tier, biased toward the
+   * Line's own Signature (`visualId`) and Common Tendency (`baseVisualId`)
+   * at the new, more modest FIELD_LINE_SIGNATURE_WEIGHT/
+   * FIELD_LINE_COMMON_TENDENCY_WEIGHT (1.30/1.15) — never the old ×3/×2
+   * weights.
+   *
+   * A Rare/Epic outcome always becomes a physical Specimen, routed through
+   * the exact same existing Specimen pipeline (buildSpecimen) real
+   * Rare/Epic finds always used — Stage A+B decide rarity+visual only, the
+   * Specimen system still decides everything else (stats, Exceptional
+   * eligibility, etc). A Common outcome is ordinary fruit — its rolled
+   * visual persists on `slot.commonVisualId` until harvest (see types.ts's
+   * FieldFruitSlot doc comment), never a change to how Common fruit is
+   * priced/harvested otherwise. Before Day `TUNING.SPECIMEN_RANDOM_START_DAY`
+   * the roll itself is skipped entirely — ordinary fruit simply renders the
+   * planted Line's own `baseVisualId` (unchanged from before this pass),
+   * preserving the Day-1/Day-2 guaranteed-Specimen onboarding beat exactly
+   * as before. The Genetic Exceptional roll (see
+   * maybeGenerateExceptionalSpecimen below) is DELIBERATELY evaluated
+   * OUTSIDE that day-gate, exactly as before this pass — it has its own
+   * independent EXCEPTIONAL_START_DAY gate and must stay reachable even if
+   * SPECIMEN_RANDOM_START_DAY were ever tuned later (see
+   * scripts/verify-exceptional-integration.ts's decoupling proof) — it only
+   * skips a fruit that already became a Rare/Epic Specimen above, so a
+   * single fruit can never carry both (see PROJECT.md "Exceptional Specimen
    * genetics core" integration, section 2).
    */
-  private maybeGenerateRandomSpecimen(slot: FieldFruitSlot, sourceVariety: Variety, policy: CultivationPolicy): void {
-    const roll = rollOrchardSpecimen(this.state.day, sourceVariety.baseVisualId, sourceVariety.visualId, this.state.discoveredVisualIds);
-    if (roll) {
-      slot.specimen = this.buildSpecimen(roll.visualId, sourceVariety);
-      if (this.registerVisualDiscovery(roll.visualId)) this.state.hasUnseenDiscovery = true;
-      return;
+  private rollFruitOutcomeForSlot(field: Field, slot: FieldFruitSlot, sourceVariety: Variety, policy: CultivationPolicy): void {
+    if (this.state.day >= TUNING.SPECIMEN_RANDOM_START_DAY) {
+      const day = this.state.day;
+      const rareEligible = isRareEligible(day);
+      const { odds } = getEffectiveRarityOdds(field.id, {
+        day,
+        rewardedRarityBoostActive: this.rewardedRarityBoostActive(),
+        firstRareProtection: this.state.firstRareProtection,
+      });
+      const tier = rollRarity(odds);
+      if (rareEligible) {
+        this.state.firstRareProtection = advanceFirstRareProtectionState(this.state.firstRareProtection, tier);
+      }
+
+      const pool = tierPool(tier, day);
+      const weights = getWithinTierVisualWeights(pool, tier, sourceVariety.visualId, sourceVariety.baseVisualId);
+      const visualId = rollVisualWithinRarity(pool, weights);
+
+      if (tier !== 'COMMON') {
+        slot.specimen = this.buildSpecimen(visualId, sourceVariety);
+        if (this.registerVisualDiscovery(visualId)) this.state.hasUnseenDiscovery = true;
+        return;
+      }
+      slot.commonVisualId = visualId;
+      if (this.registerVisualDiscovery(visualId)) this.state.hasUnseenDiscovery = true;
     }
+
     const exceptional = this.maybeGenerateExceptionalSpecimen(sourceVariety, policy);
     if (exceptional) slot.specimen = exceptional;
   }
@@ -829,12 +906,16 @@ export class Game {
     const variety = this.getVariety(field.varietyId);
     if (!variety) return false;
 
-    // Captured before this slot's own specimen field is cleared below —
-    // this is the ONE path every harvest route (direct click/sweep,
-    // HARVEST ALL, Closing's automatic ripe-fruit collection) shares, so a
-    // Specimen is preserved into the inventory identically no matter which
-    // route reached it (see PROJECT.md section 8).
+    // Captured before this slot's own specimen/commonVisualId fields are
+    // cleared below — this is the ONE path every harvest route (direct
+    // click/sweep, HARVEST ALL, Closing's automatic ripe-fruit collection)
+    // shares, so a Specimen is preserved into the inventory identically no
+    // matter which route reached it (see PROJECT.md section 8), and an
+    // ordinary apple is priced using whichever Common visual it actually
+    // rolled (see PROJECT.md "Line Affinity System") rather than always the
+    // Line's own baseVisualId.
     const specimen = slot.specimen;
+    const saleVisualId = slot.commonVisualId ?? variety.baseVisualId;
 
     // Packing Capacity gate — Specimens are exempt (see PROJECT.md
     // "Shipping Infrastructure" section 3). Checked BEFORE any mutation so
@@ -848,12 +929,14 @@ export class Game {
     slot.active = false;
     slot.timer = 0;
     slot.specimen = null;
+    slot.commonVisualId = null;
 
     const nextIndex = pickNextProductiveSlot(field.slots, slotIndex);
     const nextSlot = field.slots[nextIndex];
     nextSlot.active = true;
     nextSlot.ripe = false;
     nextSlot.specimen = null;
+    nextSlot.commonVisualId = null;
     nextSlot.timer = fruitRegrowSeconds(variety.growth, this.state.irrigationLevel);
 
     if (specimen) {
@@ -870,7 +953,7 @@ export class Game {
       return true;
     }
 
-    const { value, baseValue } = priceHarvestedApple(variety, field, this.state);
+    const { value, baseValue } = priceHarvestedApple(variety, field, this.state, saleVisualId);
     // Freshness V1: the apple's exact genetic Freshness is frozen here,
     // alongside its Market-adjusted value, the instant it enters the queue —
     // never re-derived later from whatever Line currently happens to be
@@ -1355,7 +1438,7 @@ export class Game {
         if (!variety) continue;
         field.slots.forEach((slot, i) => {
           if (!slot.ripe || slot.specimen) return;
-          const { value } = priceHarvestedApple(variety, field, this.state);
+          const { value } = priceHarvestedApple(variety, field, this.state, slot.commonVisualId ?? variety.baseVisualId);
           candidates.push({ fieldId: field.id, slotIndex: i, value });
         });
       }

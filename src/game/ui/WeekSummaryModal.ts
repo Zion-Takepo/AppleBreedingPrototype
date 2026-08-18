@@ -22,7 +22,7 @@ export function showWeekSummary(scene: Phaser.Scene, game: Game, onStartWeek2: (
 
   const stats: [string, string][] = [
     ['Fields Owned', `${fieldsOwned}`],
-    ['Varieties Created', `${varietiesCreated}`],
+    ['Lines Created', `${varietiesCreated}`],
     ['Traits Discovered', `${traitsDiscovered}`],
     ['Contest Wins', `${contestWins}`],
     ['Highest Sweetness', `${state.highestSweetnessEver}`],
@@ -43,7 +43,7 @@ export function showWeekSummary(scene: Phaser.Scene, game: Game, onStartWeek2: (
     modal.root.add(mkText(scene, x + 340, y, val, 24, THEME.textDark, true, true));
   });
 
-  modal.root.add(mkText(scene, modal.x + 60, modal.y + 336, 'Rarest Variety', 24, THEME.textMid));
+  modal.root.add(mkText(scene, modal.x + 60, modal.y + 336, 'Rarest Line', 24, THEME.textMid));
   if (rarest) {
     const apple = new AppleVisual(scene, modal.x + 104, modal.y + 432, 104);
     apple.draw({ visualId: rarest.visualId, size: rarest.size });

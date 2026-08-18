@@ -2,6 +2,7 @@ import { TUNING } from '../tuning.ts';
 import type { BreedingSpecimen, DayLogEntry, GameState, OnboardingStep, Variety } from '../types.ts';
 import { APPLE_RARITY } from '../render/appleAssets.ts';
 import { activeSlotIndices, allSlotsActive, makeInitialFruitSlots } from './economy.ts';
+import { INITIAL_FIRST_RARE_PROTECTION_STATE } from './fieldRarityModel.ts';
 import { initVisualMarketEntry } from './market.ts';
 import { freshStarterLines, STARTER_GREEN } from './starterLines.ts';
 
@@ -54,6 +55,25 @@ function backfillLineBaseVisual(variety: Partial<Variety>): void {
 // Specimen's baseVisualId can actually be recovered from its still-present
 // source Line (already migrated by the time this runs; see migrateState's
 // ordering) rather than merely falling back to its own visualId.
+// Field Rarity Model V2's first-Rare discovery protection (see
+// systems/fieldRarityModel.ts and migrateState below) must never re-grant
+// pity to a save that has already proven it found a Rare, by any historical
+// means (the old lineAffinity roll, a bred discovery, whatever) — checks
+// every place a RARE-tier visualId can persist: discovered visuals, the
+// Library, held Specimens, an in-flight breeding snapshot, and a Specimen
+// still sitting unharvested on a fruit slot. Called from migrateState AFTER
+// all of those are already migrated/backfilled above, so every field it
+// reads is safe to trust.
+function hasEverFoundRareVisual(state: GameState): boolean {
+  const isRare = (id: string | undefined | null): boolean => !!id && APPLE_RARITY[id as keyof typeof APPLE_RARITY] === 'RARE';
+  if (state.discoveredVisualIds?.some((id) => isRare(id))) return true;
+  if (state.library?.some((v) => isRare(v.visualId))) return true;
+  if (state.specimens?.some((s) => isRare(s.visualId))) return true;
+  if (state.breeding && (isRare(state.breeding.parentASpecimenSnapshot?.visualId) || isRare(state.breeding.parentBSpecimenSnapshot?.visualId))) return true;
+  if (state.fields?.some((f) => f.slots?.some((s) => isRare(s.specimen?.visualId)))) return true;
+  return false;
+}
+
 function backfillSpecimenBaseVisual(specimen: Partial<BreedingSpecimen> | null | undefined, library: Variety[]): void {
   if (!specimen || typeof specimen.baseVisualId === 'string' || !specimen.visualId) return;
   if (APPLE_RARITY[specimen.visualId] === 'COMMON') {
@@ -249,6 +269,22 @@ function migrateState(state: GameState): void {
         if (typeof slot.specimen === 'undefined') slot.specimen = null;
         else backfillSpecimenBaseVisual(slot.specimen, state.library);
       }
+      // Line Affinity System (see PROJECT.md "Line Affinity System") —
+      // saves from before this pass have no `commonVisualId` at all;
+      // backfill null first (never fabricate a historical roll). A slot
+      // that's already RIPE, ordinary (no specimen), and still has no
+      // persisted roll (a genuinely pre-existing ripe apple, not merely an
+      // old save shape) gets ONE roll backfilled here — never re-rolled on
+      // a later load — using the safest, non-exploitable "valid result":
+      // the planted Line's own baseVisualId, exactly what it was already
+      // visually showing/pricing under the old model, never a fresh random
+      // (possibly Rare/Epic) roll on mere reload.
+      for (const slot of field.slots) {
+        if (typeof slot.commonVisualId === 'undefined') slot.commonVisualId = null;
+        if (slot.ripe && !slot.specimen && !slot.commonVisualId && variety) {
+          slot.commonVisualId = variety.baseVisualId;
+        }
+      }
     }
     // The old per-field batch-deferral rule (pendingPolicy waiting for a
     // 15-fruit boundary) no longer exists — fold any stale pending value
@@ -258,6 +294,20 @@ function migrateState(state: GameState): void {
       field.policy = field.pendingPolicy;
       field.pendingPolicy = null;
     }
+  }
+
+  // Field Rarity Model V2's first-Rare discovery protection (see
+  // systems/fieldRarityModel.ts and PROJECT.md "Field Rarity + Line
+  // Affinity Probability Model V2") — a save written before this pass has
+  // no `firstRareProtection` at all. Per this pass's own migration
+  // guidance: a save that already proves the player found a Rare (by any
+  // historical means) initializes protection as permanently completed
+  // (never re-grant pity to a veteran save); otherwise the miss streak
+  // starts safely at 0, same as a brand-new game. An existing valid
+  // `firstRareProtection` object (a save already written by this pass) is
+  // trusted as-is, never reinferred.
+  if (typeof state.firstRareProtection !== 'object' || state.firstRareProtection === null) {
+    state.firstRareProtection = hasEverFoundRareVisual(state) ? { hasFoundRare: true, missStreak: 0 } : { ...INITIAL_FIRST_RARE_PROTECTION_STATE };
   }
 
   // First-session onboarding (see PROJECT.md "First-session onboarding")

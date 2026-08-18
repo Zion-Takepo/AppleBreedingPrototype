@@ -1426,80 +1426,133 @@ what the tree is otherwise showing, see "Ordinary fruit rendering /
 selling" below) and undiscovered-weighted 2x; falls back to an ordinary
 fruit if no valid alternate Visual exists rather than fabricating one.
 
-### Stable Common baseVisual / Rare-Epic Line behavior
+### Line Affinity System
 
-A Rare/Epic Specimen can still be bred and KEPT into a permanent Line —
-but the player can no longer plant that Line and mass-produce Rare/Epic
-fruit forever. Keeping a rare find captures its **special genetic
-identity/lineage**, not an "infinite factory" for its Visual.
+**SUPERSEDED for live Orchard fruit generation as of Pass 3B — see "Field
+Rarity + Line Affinity Probability Model V2" below, now the actual live
+rule.** This section is kept for history/context (the two-stage
+rarity-then-visual SHAPE it introduced is exactly what V2 still uses, just
+with a per-Field base rate instead of one global rate, and 1.30/1.15
+weights instead of the ×3/×2 below) and because a few UI probability
+displays (`ui/OrchardScreen.ts`, `ui/CollectionScreen.ts`,
+`ui/LineDetail.ts`) still read this section's exact numbers and haven't been
+updated yet (deliberately out of scope for Pass 3B — see V2's own "Live
+integration" subsection). Do not treat the numbers/mechanism below as live
+gameplay; do not reinstate `systems/lineAffinity.ts`'s
+`rollFruitOutcome`/`rollGlobalRarity`/`pickTierVisual` as the Orchard
+generation path if they're ever touched again.
 
-- **Common Lines (#001-#004) are stable cultivars**:
-  `baseVisualId = visualId` always. Planting one produces that exact
-  Visual continuously, unchanged from before this pass.
-- **Rare/Epic Lines are unstable special traits**: `baseVisualId` is a
-  Common id, inherited unchanged through breeding from whichever parent
-  contributed the special `visualId` (see Breeding's Visual inheritance
-  above — visual and base always travel together from the same parent,
-  never mixed). Example: a `COMMON · #001` tree spontaneously produces one
-  `EPIC · #009` Specimen — that Specimen has `visualId #009`,
-  `baseVisualId #001`. If bred and KEPT, the resulting Line is identified
-  in the Library as `EPIC · #009`, but planting it grows ordinary
-  `COMMON · #001` fruit, not a tree full of `#009`. The Line instead gains
-  a permanent **Mutation Affinity** for `#009` (below) — "I captured the
-  #009 bloodline," not "I unlocked an infinite #009 factory."
-- **Specimen `baseVisualId` at creation** (`Game.buildSpecimen` →
-  `systems/specimen.ts` `deriveSpecimenBaseVisualId()`, set once and never
-  re-derived): a **Common**-tier specimen's `baseVisualId` is its own
-  fresh `visualId` (a newly found stable cultivar); a **Rare/Epic**-tier
-  specimen's `baseVisualId` is inherited from the *planted source Line's
-  own* `baseVisualId` — never the source Line's `visualId`. This is why a
-  second-generation mutation (a Rare/Epic Line that itself sprouts another
-  Rare/Epic Specimen) still traces back to the original Common ordinary
-  fruit, not to the intermediate special Visual.
-- **Mutation Affinity** (`systems/specimen.ts` `mutationAffinityFor`):
-  a Rare Line's own special Visual gets `TUNING.RARE_MUTATION_AFFINITY_MULTIPLIER`
-  (×10) recurrence affinity; an Epic Line's own special Visual gets
-  `TUNING.EPIC_MUTATION_AFFINITY_MULTIPLIER` (×20). Applies **only** to
-  that exact Visual — a `#009` Line does not boost `#010`, a `#005` Line
-  does not boost `#006`/`#007`/`#008` — and never stacks by generation
-  (the multiplier is a pure function of the Line's own `visualId` alone;
-  breeding `#009` into itself repeatedly stays exactly ×20, never
-  ×20→×400). Implemented as an ADDITIONAL independent per-ripening chance
-  layered on top of (not replacing) the Visual's normal within-tier
-  baseline share (`systems/specimen.ts` `affinityBonusChance` =
-  `basePerSpecificChance(tier, day) * (multiplier - 1)`, where
-  `basePerSpecificChance` ≈ tier's base chance ÷ number of visuals in that
-  tier) — checked first, and only falls through to the ordinary
-  mutually-exclusive tier roll if it doesn't fire, so one fruit still
-  becomes at most one Specimen. This targets the matching Visual's
-  ABSOLUTE occurrence rate at roughly `multiplier`× the non-affinity
-  baseline (not merely its selection weight *after* a Rare/Epic tier
-  already occurred) — e.g. Rare: ~0.0125% baseline + ~0.1125% bonus ≈
-  0.125% total (10×); Epic: ~0.0025% baseline + ~0.0475% bonus ≈ 0.05%
-  total (20×). Still respects the existing day gates — a Rare affinity
-  cannot fire before Day 4, Epic before Day 6.
-- **Ordinary fruit rendering / selling**: a planted Field always shows
-  (and prices) its Line's `baseVisualId`, never `visualId`
-  (`render/OrchardTreeLayer.ts` `sync()`; `systems/economy.ts`
-  `priceHarvestedApple()` → `marketMultiplierForVisual(variety.baseVisualId, ...)`).
-  A Rare/Epic Line's own Market price (keyed by its `visualId`) therefore
-  has little/no direct sale usage yet in this pass — Rare/Epic Specimens
-  are still automatically preserved for breeding, not shipped (see
-  "Harvesting a Specimen" above); a sell-Specimen feature is explicitly
-  out of scope. `ui/OrchardScreen.ts` shows a small "Growing: COMMON ·
-  #001 (Special Lineage: EPIC · #009)" note whenever a planted Line's
-  `visualId` differs from its `baseVisualId`, and `ui/LineDetail.ts`
-  shows a similar "SPECIAL LINEAGE · #009 / Stable Fruit: COMMON · #001 /
-  Mutation Affinity: ×20" block in the Library Picker's detail panel — no
-  permanent Visual Variety names invented, no raw internal ids shown.
+**Canonical when originally written, since superseded per above — replaces
+the old "Rare/Epic Lines grow a stable Common baseVisual as their ordinary
+crop" rule.** Do not reinstate that older rule either; it remains superseded
+regardless of which of these two systems is currently live.
+
+A Line does NOT guarantee one apple appearance. Instead, **every** fruit
+slot — not just the rare Day-3+ Specimen roll — independently resolves a
+**two-stage roll** the instant it becomes ripe (see `Game.ts`
+`rollFruitOutcomeForSlot`, `systems/lineAffinity.ts`):
+
+1. **STAGE A — GLOBAL RARITY.** Common/Rare/Epic is rolled using the
+   game's existing global rates (`systems/lineAffinity.ts`
+   `rollGlobalRarity`): Rare = `TUNING.SPECIMEN_RARE_CHANCE` (from Day 4),
+   Epic = `TUNING.SPECIMEN_EPIC_CHANCE` (from Day 6), Common = the
+   complement (`1 - rare - epic`) — so a fruit always resolves to some
+   visual, never "no event." **The planted Line has no input to this
+   roll at all** — `rollGlobalRarity(day, rng)` doesn't even take a Line
+   parameter, so it is structurally impossible for a Line to raise or
+   lower its own Rare/Epic odds. A Rare/Epic-signature Line's total
+   Rare/Epic chance is EXACTLY the same as a Common-signature Line's.
+2. **STAGE B — WITHIN-TIER VISUAL.** Once a tier is decided, the specific
+   visual is chosen from that tier's day-unlocked candidates
+   (`systems/lineAffinity.ts` `pickTierVisual`), each starting at weight
+   1. The Line's own `visualId` — its **Signature Fruit** — gets
+   `TUNING.LINE_SIGNATURE_AFFINITY_WEIGHT` (×3) when the rolled tier
+   matches the Signature's own rarity; the Line's `baseVisualId` — its
+   **Common Tendency** — gets `TUNING.LINE_COMMON_TENDENCY_WEIGHT` (×2)
+   whenever COMMON is rolled. A Common-signature Line (`visualId ===
+   baseVisualId`) gets only the stronger Signature weight on that one
+   visual, never both weights multiplied/summed together (×3, not ×6).
+
+Worked example (the exact one this pass shipped with): a Line with
+`visualId = R2`, `baseVisualId = C1` ("SUNNY SUGAR"). Planting it does
+**not** mean every fruit is R2, and does **not** mean every ordinary
+fruit is C1. Every fruit still rolls Stage A first: if COMMON, C1 is
+favored (weight 2 of 5, i.e. 40%) but C2/C3/C4 can still occur; if RARE,
+R2 is favored (weight 3 of 6, i.e. 50%) but R1/R3/R4 can still occur; if
+EPIC, E1/E2 use the plain unweighted 50/50 split (SUNNY SUGAR has no Epic
+affinity at all). One field can visibly show C1, C3, C1, R2, C2, C1, R4,
+C1, R2, C4... in a row — this variation is intentional, not a bug.
+
+- **Terminology**: `visualId` (Signature Fruit) and `baseVisualId`
+  (Common Tendency) are unchanged as field names (see types.ts's `Variety`
+  doc comment) — only their *meaning* changed, from "guaranteed identity /
+  guaranteed stable crop" to "favored-within-its-own-rarity-tier."
+- **A Rare/Epic Stage-A outcome always becomes a physical Specimen** —
+  routed through the exact same existing Specimen pipeline
+  (`Game.buildSpecimen`) real Rare/Epic finds always used; nothing new was
+  built for this. `deriveSpecimenBaseVisualId()` is unchanged: a
+  Common-tier specimen's `baseVisualId` is its own fresh `visualId`; a
+  Rare/Epic-tier specimen's `baseVisualId` is inherited from the planted
+  source Line's own `baseVisualId`, never its `visualId` — so a
+  second-generation mutation still traces back to the original Common
+  ordinary fruit.
+- **A Common Stage-A outcome is ordinary fruit, not a Specimen.** Its
+  rolled visual is persisted on `FieldFruitSlot.commonVisualId` (see
+  types.ts) the instant it's rolled, rendered by
+  `render/OrchardTreeLayer.ts` `sync()` (falling back to the planted
+  Line's `baseVisualId` only while growing/inactive, or for fruit ripened
+  before Day `TUNING.SPECIMEN_RANDOM_START_DAY`), and cleared back to
+  `null` on harvest so the next growth cycle rolls fresh
+  (`Game.harvestFruitSlot`). This retires the old one-off "Common
+  Specimen" event entirely — Common tier no longer produces a special,
+  differently-stated fruit object at all, only visual variation on
+  otherwise-ordinary fruit. `TUNING.SPECIMEN_COMMON_CHANCE` is no longer
+  read by this roll (kept only as a harmless legacy constant one other
+  script's regression check still references).
+- **Ordinary fruit pricing** now uses whichever visual THIS apple actually
+  rolled (`systems/economy.ts` `priceHarvestedApple(variety, field, state,
+  saleVisualId)`, where `saleVisualId = slot.commonVisualId ??
+  variety.baseVisualId`), not blindly the Line's `baseVisualId` — a Line
+  whose Common Tendency visual happens to be riding a low Market price can
+  still price an off-tendency roll at that OTHER visual's own current
+  Market rate. `Game.harvestFruitSlot` and `Game.beginClosing`'s ranking
+  pass both read the same `slot.commonVisualId ?? variety.baseVisualId`
+  expression.
+- **Before Day `TUNING.SPECIMEN_RANDOM_START_DAY`** (3), the two-stage
+  roll doesn't run at all — ordinary fruit simply renders/prices the
+  planted Line's own `baseVisualId`, preserving the Day-1/Day-2 guaranteed
+  onboarding Specimen beat exactly as before this pass. The Genetic
+  Exceptional roll (`Game.maybeGenerateExceptionalSpecimen`) is
+  DELIBERATELY evaluated outside that same gate, using its own independent
+  `EXCEPTIONAL_START_DAY` — unchanged decoupling from before this pass —
+  and is only skipped for a fruit that already became a Rare/Epic
+  Specimen above.
+- **UI**: `ui/OrchardScreen.ts`'s Field card shows a compact "Signature:
+  #010 · RARE · ×3" note whenever a planted Line's `visualId` differs from
+  its `baseVisualId` (never claims every apple looks like the Signature).
+  `ui/LineDetail.ts` (the Library Picker's detail panel, reused by Breed
+  parent selection and Contest entry) shows "SIGNATURE FRUIT · RARE ·
+  AFFINITY ×3", an optional compact "Common Tendency: #001 · ×2" line, and
+  a one-line note ("Rarity odds stay global. When a Rare fruit appears,
+  this Line favors {customName}."). `ui/CollectionScreen.ts`'s LINES tab
+  additionally computes and shows the exact derived conditional
+  percentage (e.g. "AFFINITY ×3 (50% of rare fruit)") via
+  `systems/lineAffinity.ts` `signatureConditionalPct`/
+  `commonTendencyConditionalPct` — real math, never a hard-coded example
+  number.
 - **KEEP / ownership semantics are unchanged**: KEEPing a Rare/Epic
   offspring still makes that Visual **OWNED** (`Game.isVisualIdOwned()`
   still derives purely from `Library.some(v => v.visualId === id)`, keyed
-  on identity `visualId`, never `baseVisualId`) — Market may still show it
-  as OWNED. That's intentional: the Line owns the special genetic
-  identity/affinity; its normal Orchard production is `baseVisualId`.
-  Holding a Specimen alone (never KEPT into a Line) does NOT make its
-  Visual OWNED.
+  on identity `visualId`, never `baseVisualId`). Holding a Specimen alone
+  (never KEPT into a Line) does NOT make its Visual OWNED.
+- **GAME-BALANCE INVARIANT (critical, verified)**: a Line's Signature
+  affinity MUST NOT modify the probability of rolling Common/Rare/Epic. If
+  global Rare chance is X%, an R2-signature Line still has exactly X%
+  total Rare chance — affinity only ever redistributes WHICH Rare visual
+  appears inside that X%, never the X% itself. This is the exact rule the
+  old ×10/×20 Mutation Affinity multiplier violated (it raised a matching
+  Line's ABSOLUTE Rare/Epic occurrence rate) — that mechanic is fully
+  retired, not merely retuned.
 
 **Specimen stat generation** (`systems/specimen.ts`
 `generateSpecimenStats`) — a mutation of the Line it grew on, never five
@@ -1568,22 +1621,238 @@ its own `visualId` too (never a crash, never fabricated data — the same
 uses).
 
 Verification: `scripts/verify-specimens.ts` (`node
-scripts/verify-specimens.ts`) — guarantees, Day-3+ appearance
-probabilities, stat generation, discovery timing, all four harvest routes,
-parent selection (Line×Line/Line×Specimen/Specimen×Specimen/rejecting a
-duplicate specimen id), consumption timing + save/reload, the A/B/C/D
-Visual+base inheritance rules (including Candidate D's now-Common-only
-mutation), Breed TOTAL progression (shared target, +2..+6 range, 360 cap
-and its one exception), `baseVisualId` derivation/propagation/ordinary
-pricing, Mutation Affinity's absolute-rate math (both the exact bonus
-formula and an end-to-end ~10x/~20x statistical check, including that
-sibling Rare/Epic visuals stay unboosted), and old-save migration
-(including `baseVisualId` recovery). The Breed strategic-pause GATE itself
-is a `scenes/MainScene.ts`-level conditional and can't be exercised from
-this Node script — documented there as an explicit limitation, along with
+scripts/verify-specimens.ts`) — guarantees, the Line Affinity System's
+two-stage roll (Stage A global-rarity invariance across differing
+Signatures, Stage B's exact weighted odds for Signature/Common Tendency
+including the "same visual" ×3-not-×6 case, day-gating end-to-end), stat
+generation, discovery timing, all four harvest routes, parent selection
+(Line×Line/Line×Specimen/Specimen×Specimen/rejecting a duplicate specimen
+id), consumption timing + save/reload, the A/B/C/D Visual+base inheritance
+rules (including Candidate D's now-Common-only mutation), Breed TOTAL
+progression (shared target, +2..+6 range, 360 cap and its one exception),
+`baseVisualId` derivation/propagation, ordinary-fruit pricing using
+whichever visual a fruit actually rolled (not blindly the Line's
+`baseVisualId`), and old-save migration (including `baseVisualId` and the
+new `commonVisualId` backfill). The Breed strategic-pause GATE itself is a
+`scenes/MainScene.ts`-level conditional and can't be exercised from this
+Node script — documented there as an explicit limitation, along with
 Phaser-rendered UI (the Specimen's illustration actually swapping on the
 tree, the picker's LINES/SPECIMENS toggle, the stat-help modal/info
 buttons), matching `scripts/verify-market.ts`'s own convention.
+
+## Field Rarity + Line Affinity Probability Model V2
+
+**LIVE since Pass 3B.** This is now the canonical, ACTUAL rule driving every
+ordinary Orchard fruit-generation roll — implemented and unit-tested in
+`src/game/systems/fieldRarityModel.ts` (`scripts/verify-field-rarity-model.ts`
+for the pure probability engine; `scripts/verify-orchard-rarity-integration.ts`
+for the live wiring through `Game.ts`). The OLD global day-gated roll
+described in "Line Affinity System" above (`SPECIMEN_RARE_CHANCE`/
+`SPECIMEN_EPIC_CHANCE`, `LINE_SIGNATURE_AFFINITY_WEIGHT` ×3 /
+`LINE_COMMON_TENDENCY_WEIGHT` ×2) no longer drives any live fruit
+generation — see "Live integration (Pass 3B)" below for exactly what
+replaced it, where, and what was deliberately left alone.
+
+**Canonical fruit generation order** (`Game.rollFruitOutcomeForSlot`, called
+once from `Game.update()`'s ripening block the instant a slot's regrow timer
+crosses zero — never later, never re-run by `sync()`/save-reload/screen
+navigation):
+
+1. Resolve the owning Field: `field.id` (1-based, `Field 1..4`) is used
+   DIRECTLY as `fieldIndex` into `FIELD_RARITY_TABLE` — never the count of
+   currently-unlocked Fields, never "currently selected Field". A fruit
+   physically growing on Field 1 always uses Field 1's own odds, even after
+   Field 4 has been purchased (verified statistically — Field 4's purchase
+   moves Field 1's own live Rare rate by nothing beyond ordinary sampling
+   noise).
+2. STAGE A rolls Common/Rare/Epic using that Field's base odds, day-gated
+   exactly like the old roll (Rare zeroed before `RARE_UNLOCK_DAY`, Epic
+   before `EPIC_UNLOCK_DAY` — their mass folding back into Common), with
+   first-Rare protection consulted via `GameState.firstRareProtection` and
+   `rewardedRarityBoostActive` always `false` (see "Live integration" below).
+3. STAGE B picks the specific visual within the decided tier, weighted
+   toward the planted Line's Signature/Common Tendency at this section's
+   1.30/1.15 weights.
+4. A Rare/Epic outcome is routed straight into the existing Specimen
+   pipeline (`Game.buildSpecimen`) — the new model decides rarity + which
+   visual only; the Specimen system still decides everything else (stats,
+   Exceptional eligibility, discovery, KEEP/OWNED semantics), completely
+   unchanged.
+5. A Common outcome persists on `FieldFruitSlot.commonVisualId` — this field
+   already existed (from the retired Line Affinity System) and is reused
+   as-is; no new field was needed. It's the fruit slot's authoritative rolled
+   visual identity — `OrchardTreeLayer`'s RIPE rendering (unchanged by this
+   pass) already reads `specimen?.visualId ?? (slot.commonVisualId ??
+   variety.baseVisualId)`, never `variety.visualId`/`variety.baseVisualId`
+   unconditionally, and never rolls anything itself.
+
+**FIELD — controls rarity base odds.** Rarity becomes a function of which
+Field a fruit grows on instead of a single global day-gated rate. Explicit
+four-row table for the current 4-Field prototype (`TUNING.FIELD_RARITY_TABLE`,
+`getFieldBaseRarityOdds(fieldIndex)` — 1-based, matching `Field.id`), later
+Fields only modestly better:
+
+| Field | Common  | Rare   | Epic   |
+|-------|---------|--------|--------|
+| 1     | 98.40%  | 1.50%  | 0.10%  |
+| 2     | 98.15%  | 1.70%  | 0.15%  |
+| 3     | 97.75%  | 2.00%  | 0.25%  |
+| 4     | 97.25%  | 2.40%  | 0.35%  |
+
+Each row sums to exactly 1. Not interpolated dynamically — a fixed explicit
+table.
+
+**VARIETY / LINE — Signature affects only within-tier visual selection.**
+Same two-stage separation as the current Line Affinity System (Field/Stage-A
+rarity roll never takes a Signature/visualId parameter at all — the two are
+structurally decoupled), but with new, more modest weights than the current
+×3/×2 system, kept under distinctly-namespaced constants
+(`TUNING.FIELD_LINE_SIGNATURE_WEIGHT`/`FIELD_LINE_COMMON_TENDENCY_WEIGHT` —
+never confused with the live `LINE_SIGNATURE_AFFINITY_WEIGHT`/
+`LINE_COMMON_TENDENCY_WEIGHT`):
+
+- **Signature Fruit** (`visualId`) gets weight **1.30** among that tier's
+  day-unlocked candidates, when the rolled tier matches the Signature's own
+  rarity. Every other visual in that tier stays at weight 1. E.g. an R2
+  Signature among R1-R4 -> R2 ≈ 30.23%, R1/R3/R4 ≈ 23.26% each. Having a
+  Signature never changes the total chance of rolling that tier at all — it
+  only reweights which visual appears once the tier is already decided.
+- **Common Tendency** (`baseVisualId`) gets weight **1.15** among the
+  Common candidates, only when COMMON is rolled. E.g. with 4 Common visuals,
+  tendency ≈ 27.71%, others ≈ 24.10% each.
+- **No stacking**: if `visualId === baseVisualId` (a Common-signature Line),
+  that visual gets only the stronger Signature weight (1.30), never both
+  weights multiplied/summed.
+- **Future-proof selection**: weights are computed from whatever pool the
+  project's own day-gated rarity registry (`systems/rarity.ts`'s
+  `tierPool`) returns for that tier/day — no hard-coded "Rare always has 4
+  visuals" assumption. A tier gaining another visual later needs no change
+  to this module.
+
+**RETENTION — one-time first-Rare discovery protection.** Applies only
+until the player's first-ever Rare; permanently and irreversibly inactive
+afterward (`FirstRareProtectionState.hasFoundRare`). Counts consecutive
+ELIGIBLE rolls (Rare structurally possible — reuses the existing
+`RARE_UNLOCK_DAY` gate, no new day-gate invented) without a Rare result,
+including Epic results (a "special" outcome for the roll itself, but this
+codebase has no existing progression semantics that treat obtaining Epic as
+equivalent to Rare discovery, so it does not end protection — it still
+counts as a miss):
+
+- Eligible rolls 1-10: Field's normal Rare odds, untouched.
+- From roll 11: Rare gains `TUNING.FIRST_RARE_BONUS_PER_MISS` (+0.75
+  percentage points) per additional consecutive miss (roll 11 -> +0.75pp,
+  roll 12 -> +1.50pp, roll 13 -> +2.25pp, ...), taken from Common only —
+  Epic is never touched by this.
+- Roll 25 (the 25th eligible roll with no Rare yet): hard guarantee —
+  Rare = 100%, Common = 0%, Epic = 0% for that one roll.
+- The instant a Rare actually appears, protection ends permanently — the
+  streak counter resets and becomes irrelevant; every later roll uses
+  normal Field odds (plus any other explicit modifier, e.g. rewarded boost)
+  with no further first-Rare involvement, ever.
+
+**FUTURE REWARDED AD — probability support only, no ad SDK/UI yet.** A
+`rewardedRarityBoostActive: boolean` option on `getEffectiveRarityOdds`
+multiplies both Rare and Epic by `TUNING.REWARDED_RARITY_MULTIPLIER` (×1.50),
+Common absorbing the difference — e.g. Field 1 boosted -> Rare 2.25%, Epic
+0.15%, Common 97.60%; Field 4 boosted -> Rare 3.60%, Epic 0.525%, Common
+95.875%. A plain boolean, not a stackable counter — it can never compound
+with itself. No CrazyGames SDK, ad lifecycle, or UI trigger exists yet;
+this is purely the probability math a later pass will gate behind one.
+
+**Combining boost + first-Rare protection** (`getEffectiveRarityOdds`'s own
+documented order, never duplicated elsewhere): Field base odds -> apply
+rewarded multiplier if active -> apply first-Rare bonus/guarantee if
+provided -> normalize (extra Rare mass always taken from Common, Epic only
+ever touched by the rewarded multiplier) -> clamp to `[0,1]` -> the actual
+roll happens separately (`rollRarity`). A guarantee short-circuits the
+multiplier entirely (Rare = 100% regardless of any active boost).
+
+**API** (`src/game/systems/fieldRarityModel.ts`): `getFieldBaseRarityOdds`,
+`getEffectiveRarityOdds`, `rollRarity`, `getWithinTierVisualWeights`,
+`rollVisualWithinRarity`, plus `isRareEligible`/`isEpicEligible`,
+`firstRareBonusForState`/`advanceFirstRareProtectionState` (first-Rare
+protection's pure state machine — caller-owned state; this pass does not add
+any field to `GameState`/save data for it), and a convenience full-pipeline
+`rollFieldFruitOutcome` for tests/future integration. All pure, RNG
+injectable (defaults to `Math.random`, matching this codebase's existing
+convention), no `Math.random()` calls hidden inside deterministic paths.
+
+Verification (pure engine): `scripts/verify-field-rarity-model.ts` — all four
+Field rows exact and summing to 1 (section 12), Signature/Common-Tendency
+weighting including the no-stacking case and a hypothetical extra-visual tier
+(section 13), Stage-A/Stage-B decoupling (section 14), first-Rare
+protection's exact ramp/guarantee/permanent-end/pre-eligibility-inactive
+behavior via deterministic (non-Monte-Carlo) state transitions (section 15),
+the rewarded boost's exact figures and non-stacking (section 16).
+
+### Live integration (Pass 3B)
+
+**`Game.rollFruitOutcomeForSlot`** (private, called once per ripening — see
+"Canonical fruit generation order" above) is the sole live caller. It calls
+`getEffectiveRarityOdds`/`rollRarity`/`getWithinTierVisualWeights`/
+`rollVisualWithinRarity` directly (not the `rollFieldFruitOutcome`
+convenience wrapper), since it needs to thread `GameState.firstRareProtection`
+through `advanceFirstRareProtectionState` between Stage A and Stage B.
+`getEffectiveRarityOdds` gained one small addition for this pass: an optional
+`day` field on `EffectiveRarityOptions` — when provided, Rare/Epic are zeroed
+below their own unlock day (mirroring the old roll's day-gating) before the
+rewarded-multiplier/first-Rare-bonus steps run; omitted (as every Pass-3A
+test still does), behavior is exactly as before. `rewardedRarityBoostActive`
+is hardcoded `false` via `Game.rewardedRarityBoostActive()` — its own private
+method, so a later pass can wire real eligibility there without touching the
+rarity algorithm itself; no ad SDK/UI exists yet.
+
+**First-Rare protection is now persisted** — `GameState.firstRareProtection:
+FirstRareProtectionState`. Advanced via `advanceFirstRareProtectionState`
+only on Rare-ELIGIBLE rolls (`isRareEligible(day)` true); a pre-eligibility
+roll never touches the counter at all, matching "ELIGIBLE MISS COUNTING"
+above. **Save migration** (`systems/save.ts`): a save with no
+`firstRareProtection` at all initializes it as permanently completed
+(`hasFoundRare: true`) if the save already proves a Rare was found anywhere
+— `discoveredVisualIds`, the Library, held Specimens, an in-flight breeding
+snapshot, or an unharvested slot Specimen (`hasEverFoundRareVisual`) — so a
+veteran save is never accidentally re-granted first-Rare pity; otherwise it
+starts fresh (`missStreak: 0`), identical to a brand-new game.
+
+**Ordinary-fruit visual persistence reuses `FieldFruitSlot.commonVisualId`
+as-is** (no rename, no new field) — it already had exactly this pass's
+required shape (nullable, rolled once at ripening, cleared on harvest,
+survives save/reload/render untouched) from the retired Line Affinity
+System, so `types.ts`'s doc comment was updated in place rather than adding a
+parallel field.
+
+**Retired from the live Orchard path, but deliberately kept in the
+codebase**: `systems/lineAffinity.ts`'s own `rollFruitOutcome`/
+`rollGlobalRarity`/`pickTierVisual` are no longer called by `Game.ts` at
+all — `fieldRarityModel.ts` re-exports that file's `tierPool` directly rather
+than duplicating the day-gated pool lookup. The file itself is NOT deleted:
+`signatureConditionalPct`/`commonTendencyConditionalPct` (and the old ×3/×2
+`LINE_SIGNATURE_AFFINITY_WEIGHT`/`LINE_COMMON_TENDENCY_WEIGHT` constants they
+read) still back a few UI probability displays this pass deliberately left
+untouched (`ui/OrchardScreen.ts`'s "Signature: #010 · RARE · ×3" note,
+`ui/CollectionScreen.ts`'s "AFFINITY ×3 (50% of rare fruit)" line,
+`ui/LineDetail.ts`'s "SIGNATURE FRUIT · RARE · AFFINITY ×3") — **those
+displays are now numerically stale**, still showing the old ×3/×2 figures
+against a live model that actually uses 1.30/1.15. A future UI pass needs to
+either point them at `fieldRarityModel.ts`'s own weights or retire them; not
+done here per this pass's explicit "no UI redesign" scope.
+
+Verification (live wiring): `scripts/verify-orchard-rarity-integration.ts` —
+all four Field rows' exact Rare/Epic rates proven statistically through the
+REAL `Game.update()` ripening path (not the pure engine directly), Field 4's
+purchase provably not moving Field 1's own odds, the live rate visibly
+distinct from the old retired global `SPECIMEN_RARE_CHANCE`, one-roll-per-cycle
+persistence (no reroll across repeated `update()` calls, across save/reload,
+or across harvest-then-regrow), a physical Rare Specimen keeping its exact
+visual through harvest, first-Rare protection's ramp/guarantee/permanent-end
+live through `GameState` (including the exact roll-11/roll-25 boundaries),
+both legacy-save migration cases (a save that already found a Rare vs. one
+that never did), and Signature/Common-Tendency weighting live (including the
+day-gate holding even with a strongly matching Signature). Does not exercise
+`OrchardTreeLayer`'s actual Phaser rendering or the UI probability displays
+noted above as stale — those need human/browser verification like every
+other Phaser-rendered concern in this document.
 
 ## Economy
 

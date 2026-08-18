@@ -1,7 +1,25 @@
 import Phaser from 'phaser';
 import { Game } from '../Game.ts';
 import { LAYOUT, THEME } from '../ui/theme.ts';
-import { HUD } from '../ui/HUD.ts';
+import {
+  HUD,
+  ORCHARD_END_DAY_BUTTON_KEY,
+  ORCHARD_END_DAY_BUTTON_PATH,
+  ORCHARD_HUD_ICON_CALENDAR_KEY,
+  ORCHARD_HUD_ICON_CALENDAR_PATH,
+  ORCHARD_HUD_ICON_CASH_KEY,
+  ORCHARD_HUD_ICON_CASH_PATH,
+  ORCHARD_HUD_ICON_CONTEST_KEY,
+  ORCHARD_HUD_ICON_CONTEST_PATH,
+  ORCHARD_HUD_ICON_MARKET_DOWN_KEY,
+  ORCHARD_HUD_ICON_MARKET_DOWN_PATH,
+  ORCHARD_HUD_ICON_MARKET_FLAT_KEY,
+  ORCHARD_HUD_ICON_MARKET_FLAT_PATH,
+  ORCHARD_HUD_ICON_MARKET_UP_KEY,
+  ORCHARD_HUD_ICON_MARKET_UP_PATH,
+  ORCHARD_HUD_INFO_PANEL_KEY,
+  ORCHARD_HUD_INFO_PANEL_PATH,
+} from '../ui/HUD.ts';
 import { BottomNav, type ScreenId } from '../ui/BottomNav.ts';
 import {
   ORCHARD_BACKGROUND_KEY,
@@ -19,6 +37,19 @@ import {
   WIND_FOLIAGE_TOP_RIGHT_PATH,
 } from '../ui/OrchardScreen.ts';
 import { ORCHARD_CANOPY_KEY, ORCHARD_CANOPY_PATH, ORCHARD_APPLE_BAGGED_KEY, ORCHARD_APPLE_BAGGED_PATH } from '../render/OrchardTreeLayer.ts';
+import { ORCHARD_BGM_01_LAUREL_VILLAGE_KEY, ORCHARD_BGM_01_LAUREL_VILLAGE_PATH } from '../systems/orchardBgm.ts';
+import {
+  ORCHARD_LEAVES_KEY,
+  ORCHARD_LEAVES_PATH,
+  ORCHARD_BIRD_01_KEY,
+  ORCHARD_BIRD_01_PATH,
+  ORCHARD_BIRD_02_KEY,
+  ORCHARD_BIRD_02_PATH,
+  ORCHARD_BIRD_03_KEY,
+  ORCHARD_BIRD_03_PATH,
+} from '../systems/orchardAmbience.ts';
+import { NOTIFICATION_POSITIVE_KEY, NOTIFICATION_POSITIVE_PATH } from '../systems/notificationSfx.ts';
+import { ORCHARD_APPLE_PICK_RUSTLE_KEY, ORCHARD_APPLE_PICK_RUSTLE_PATH } from '../systems/harvestSfx.ts';
 import { BreedScreen } from '../ui/BreedScreen.ts';
 import { CalendarScreen } from '../ui/CalendarScreen.ts';
 import { CollectionScreen } from '../ui/CollectionScreen.ts';
@@ -107,6 +138,27 @@ export class MainScene extends Phaser.Scene {
     this.load.image(ORCHARD_STATS_FRAME_KEY, ORCHARD_STATS_FRAME_PATH);
     this.load.image(WIND_FOLIAGE_TOP_LEFT_KEY, WIND_FOLIAGE_TOP_LEFT_PATH);
     this.load.image(WIND_FOLIAGE_TOP_RIGHT_KEY, WIND_FOLIAGE_TOP_RIGHT_PATH);
+    this.load.image(ORCHARD_END_DAY_BUTTON_KEY, ORCHARD_END_DAY_BUTTON_PATH);
+    this.load.image(ORCHARD_HUD_INFO_PANEL_KEY, ORCHARD_HUD_INFO_PANEL_PATH);
+    this.load.image(ORCHARD_HUD_ICON_CALENDAR_KEY, ORCHARD_HUD_ICON_CALENDAR_PATH);
+    this.load.image(ORCHARD_HUD_ICON_CASH_KEY, ORCHARD_HUD_ICON_CASH_PATH);
+    this.load.image(ORCHARD_HUD_ICON_MARKET_UP_KEY, ORCHARD_HUD_ICON_MARKET_UP_PATH);
+    this.load.image(ORCHARD_HUD_ICON_MARKET_DOWN_KEY, ORCHARD_HUD_ICON_MARKET_DOWN_PATH);
+    this.load.image(ORCHARD_HUD_ICON_MARKET_FLAT_KEY, ORCHARD_HUD_ICON_MARKET_FLAT_PATH);
+    this.load.image(ORCHARD_HUD_ICON_CONTEST_KEY, ORCHARD_HUD_ICON_CONTEST_PATH);
+    // Orchard BGM (see systems/orchardBgm.ts) — track 1 only for now; tracks
+    // 2-4 get preloaded here too once their asset files actually exist.
+    this.load.audio(ORCHARD_BGM_01_LAUREL_VILLAGE_KEY, ORCHARD_BGM_01_LAUREL_VILLAGE_PATH);
+    // Orchard environmental audio (see systems/orchardAmbience.ts) — leaves/
+    // wind ambience + 3 independent bird clips.
+    this.load.audio(ORCHARD_LEAVES_KEY, ORCHARD_LEAVES_PATH);
+    this.load.audio(ORCHARD_BIRD_01_KEY, ORCHARD_BIRD_01_PATH);
+    this.load.audio(ORCHARD_BIRD_02_KEY, ORCHARD_BIRD_02_PATH);
+    this.load.audio(ORCHARD_BIRD_03_KEY, ORCHARD_BIRD_03_PATH);
+    // Positive notification SFX (see systems/notificationSfx.ts).
+    this.load.audio(NOTIFICATION_POSITIVE_KEY, NOTIFICATION_POSITIVE_PATH);
+    // Apple-harvest rustle SFX (see systems/harvestSfx.ts).
+    this.load.audio(ORCHARD_APPLE_PICK_RUSTLE_KEY, ORCHARD_APPLE_PICK_RUSTLE_PATH);
   }
 
   create(): void {
@@ -125,6 +177,14 @@ export class MainScene extends Phaser.Scene {
     this.textures.get(ORCHARD_STATS_FRAME_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
     this.textures.get(WIND_FOLIAGE_TOP_LEFT_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
     this.textures.get(WIND_FOLIAGE_TOP_RIGHT_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_END_DAY_BUTTON_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_HUD_INFO_PANEL_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_HUD_ICON_CALENDAR_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_HUD_ICON_CASH_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_HUD_ICON_MARKET_UP_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_HUD_ICON_MARKET_DOWN_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_HUD_ICON_MARKET_FLAT_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    this.textures.get(ORCHARD_HUD_ICON_CONTEST_KEY).setFilter(Phaser.Textures.FilterMode.LINEAR);
 
     const bg = this.add.graphics();
     bg.fillStyle(THEME.bgSky, 1);
@@ -157,10 +217,10 @@ export class MainScene extends Phaser.Scene {
 
     this.logic.on((event) => {
       if (event.type === 'breedingReady' && this.activeScreen !== 'BREED') {
-        this.toasts.show('Breeding complete! Check the BREED tab.', THEME.gold);
+        this.toasts.show('Breeding complete! Check the BREED tab.', THEME.gold, undefined, true);
       }
       if (event.type === 'traitDiscovered' && this.activeScreen !== 'COLLECTION') {
-        this.toasts.show('New trait discovered!', THEME.gold);
+        this.toasts.show('New trait discovered!', THEME.gold, undefined, true);
       }
       if (event.type === 'specimenAcquired') {
         if (event.specimen.exceptionalArchetype) {
@@ -174,7 +234,7 @@ export class MainScene extends Phaser.Scene {
           this.toasts.show(formatExceptionalReveal(event.specimen, sourceStats), THEME.gold, EXCEPTIONAL_REVEAL_HOLD_MS);
           playExceptionalFoundCue();
         } else {
-          this.toasts.show(`SPECIMEN ACQUIRED — ${catalogLabel(event.specimen.visualId)}`, THEME.gold);
+          this.toasts.show(`SPECIMEN ACQUIRED — ${catalogLabel(event.specimen.visualId)}`, THEME.gold, undefined, true);
         }
       }
       if (event.type === 'packingFull') {
@@ -230,7 +290,7 @@ export class MainScene extends Phaser.Scene {
       // never visually overlap since both go through the same serialized
       // ToastQueue (see ui/modals.ts) — no artificial delay needed.
       if (event.type === 'onboardingComplete') {
-        this.toasts.show('NEW LINE CREATED — Breed again to improve stats, specialize traits, or preserve a visual lineage.', THEME.gold);
+        this.toasts.show('NEW LINE CREATED — Breed again to improve stats, specialize traits, or preserve a visual lineage.', THEME.gold, undefined, true);
         this.maybeShowMarketHint();
       }
       // Fallback Market-hint trigger (see PROJECT.md "Market discoverability")
@@ -294,6 +354,34 @@ export class MainScene extends Phaser.Scene {
     }
 
     this.logRenderDiagnostics();
+    this.logAudioDiagnostics();
+  }
+
+  // TEMPORARY, dev-only: Orchard ambience/notification playback-correctness
+  // pass — reports whether each of the new audio keys actually made it into
+  // Phaser's audio cache after preload() (a decode failure logs its own
+  // console.error but otherwise fails silently — this makes that visible),
+  // plus the Sound Manager's lock/mute/volume state at scene start. Safe to
+  // delete once the new audio is confirmed audible in-browser; never runs in
+  // a production build.
+  private logAudioDiagnostics(): void {
+    if (!import.meta.env.DEV) return;
+    const keys = {
+      bgmTrack1: ORCHARD_BGM_01_LAUREL_VILLAGE_KEY,
+      leaves: ORCHARD_LEAVES_KEY,
+      bird01: ORCHARD_BIRD_01_KEY,
+      bird02: ORCHARD_BIRD_02_KEY,
+      bird03: ORCHARD_BIRD_03_KEY,
+      notification: NOTIFICATION_POSITIVE_KEY,
+      harvestRustle: ORCHARD_APPLE_PICK_RUSTLE_KEY,
+    };
+    const cacheStatus = Object.fromEntries(Object.entries(keys).map(([name, key]) => [name, this.cache.audio.has(key)]));
+    console.log('[audio-diagnostics] cache presence (bgmTrack1 is the already-working baseline):', cacheStatus);
+    console.log('[audio-diagnostics] sound manager state:', {
+      locked: this.sound.locked,
+      mute: this.sound.mute,
+      volume: this.sound.volume,
+    });
   }
 
   // Temporary, dev-only: proves what the canvas backing store actually is

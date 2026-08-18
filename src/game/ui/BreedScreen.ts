@@ -302,7 +302,7 @@ export class BreedScreen extends Phaser.GameObjects.Container {
       this.selectedA = null;
       this.selectedB = null;
       this.selectedSlot = null;
-      this.toasts.show('Breeding started! Check back soon.', THEME.accent);
+      this.toasts.show('Breeding started! Check back soon.', THEME.accent, undefined, true);
       this.render();
     } else {
       this.toasts.show('Cannot start breeding right now.', THEME.danger);

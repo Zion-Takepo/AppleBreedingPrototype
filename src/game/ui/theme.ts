@@ -51,6 +51,30 @@ export const THEME = {
   fontNumeric: '"Trebuchet MS", Georgia, sans-serif',
 };
 
+// High-DPI text sharpness (Orchard typography pass). Phaser 4.2.1 exposes no
+// global renderer `resolution` GameConfig property (confirmed dead end — see
+// MainScene.logRenderDiagnostics), but every individual Text object accepts
+// its own `resolution` style value ("DPI setting", default effectively 1).
+// Applied to the shared text()/Button helpers in uiKit.ts so canvas-backed
+// glyphs sample at real device pixel density instead of blurring when the
+// 1600x900-authored canvas is CSS-scaled up to fill the viewport. Capped at
+// 2 — this is still flat 2D UI text, not something that benefits from
+// arbitrarily large backing textures on very-high-DPI displays.
+export const TEXT_RESOLUTION = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 2);
+
+// Very subtle lift for warm-cream text sitting directly on dark-green
+// panels (Orchard typography pass "TEXT RENDERING QUALITY" — explicitly
+// capped at a soft, barely-there shadow: ~30% black, ~1px down, tiny blur).
+// Never used on the dark-panel-on-cream case (textDark on cream already has
+// enough natural contrast) — only opted into per call site below.
+export const DARK_PANEL_TEXT_SHADOW = {
+  offsetX: 0,
+  offsetY: 1,
+  color: 'rgba(0,0,0,0.3)',
+  blur: 1,
+  fill: true,
+};
+
 // Orchard presentation palette (see PROJECT.md "Orchard UI redesign" /
 // "COLOR SYSTEM") — warm, elegant, pastoral, scenery-first. Deliberately a
 // SEPARATE set of tokens from THEME above rather than edits to it: THEME's
@@ -64,15 +88,33 @@ export const ORCHARD = {
   cream: 0xf4eed6,
   creamStr: '#f4eed6',
   // Secondary cream tone for controls deliberately subordinate to the
-  // primary deep-forest/gold actions (e.g. CHANGE VARIETY, unselected
+  // primary deep-forest/gold actions (e.g. CHANGE LINE, unselected
   // Cultivation segments) — see PROJECT.md "Orchard UI Final Structure +
   // Styling Pass" gold-usage rule: gold is an accent, not a general fill.
   mutedCream: 0xded5af,
   mutedCreamStr: '#ded5af',
   gold: 0xc7a24a,
-  goldStr: '#c7a24a',
+  // Small-heading/secondary-accent text color on dark-green panels (Orchard
+  // typography pass "COLOR SYSTEM") — used only for text, never for the
+  // graphic frame/icon accents above, which stay on the original `gold`.
+  goldStr: '#d1ae55',
   goldHighlight: 0xe1c56a,
   goldHighlightStr: '#e1c56a',
-  textDark: '#2c321f',
-  textWarmLight: '#f2e9cc',
+  // Main text/numbers on cream/light panels (Orchard typography pass).
+  textDark: '#3d382b',
+  // Secondary labels on cream/light panels (Orchard typography pass) —
+  // e.g. stat labels, CULTIVATION.
+  textMutedOnCream: '#6c624b',
+  // Main text on dark-green panels (Orchard typography pass).
+  textWarmLight: '#f4e8c1',
+  // Local variable fonts (see public/assets/fonts/) — loaded via @font-face
+  // in style.css and pre-warmed in main.ts before the Phaser game boots, so
+  // no external Google Fonts runtime dependency and no fallback-font flash
+  // on first paint. fontDisplay is the decorative headline/action serif
+  // (Cormorant Garamond); fontBody is the readable secondary serif (Libre
+  // Baskerville). Scoped to the ORCHARD token set only — Breed/Calendar/
+  // Collection keep THEME.font untouched, per this pass's "Orchard screen
+  // only" scope.
+  fontDisplay: '"Cormorant Garamond", Georgia, serif',
+  fontBody: '"Libre Baskerville", Georgia, serif',
 };

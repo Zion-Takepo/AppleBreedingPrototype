@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { LAYOUT, THEME } from './theme.ts';
 import { panel } from './uiKit.ts';
+import { playNotificationSfx } from '../systems/notificationSfx.ts';
 
 export interface ModalHandle {
   root: Phaser.GameObjects.Container;
@@ -42,6 +43,7 @@ interface QueuedToast {
   message: string;
   color: number;
   holdMs: number;
+  playSound: boolean;
 }
 
 const DEFAULT_TOAST_HOLD_MS = 1800;
@@ -83,9 +85,18 @@ export class ToastQueue {
    * denser/longer message like that reveal stay up long enough to actually
    * read; every other existing call site is unaffected since it just keeps
    * relying on the default.
+   *
+   * `playSound` (default false) plays the approved positive-notification
+   * cue (see systems/notificationSfx.ts) exactly once, the moment THIS
+   * toast actually begins presenting — never at push time (so a burst of
+   * queued toasts doesn't fire several sounds at once) and never more than
+   * once per toast even though this queue can hold several. Reserved for
+   * genuinely positive events (breeding complete, trait discovered,
+   * specimen acquired, new field, etc.) — never generic button feedback,
+   * and never the danger-colored warning/error toasts.
    */
-  show(message: string, color = THEME.gold, holdMs = DEFAULT_TOAST_HOLD_MS): void {
-    this.queue.push({ message, color, holdMs });
+  show(message: string, color = THEME.gold, holdMs = DEFAULT_TOAST_HOLD_MS, playSound = false): void {
+    this.queue.push({ message, color, holdMs, playSound });
     if (!this.presenting) this.presentNext();
   }
 
@@ -96,6 +107,7 @@ export class ToastQueue {
       return;
     }
     this.presenting = true;
+    if (next.playSound) playNotificationSfx(this.scene);
 
     const scene = this.scene;
     const lines = next.message.split('\n');

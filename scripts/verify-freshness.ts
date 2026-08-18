@@ -162,7 +162,7 @@ const approx = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
 
   const slotIndex = field.slots.findIndex((s) => s.active);
   setSlot(field, slotIndex, true);
-  const expected = priceHarvestedApple(variety, field, game.state);
+  const expected = priceHarvestedApple(variety, field, game.state, variety.baseVisualId);
   const ok = game.harvestFruitSlot(field.id, slotIndex);
   assert('harvest succeeds', ok === true);
 
@@ -388,7 +388,7 @@ const approx = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
     if (++guard > 5000) throw new Error('Queue never drained');
   }
   const variety = game.getVariety(field.varietyId)!;
-  const expected = priceHarvestedApple(variety, field, game.state);
+  const expected = priceHarvestedApple(variety, field, game.state, variety.baseVisualId);
   const harvested = game.harvestFruitSlot(field.id, overflowSlot);
   assert('the previously-overflowed apple can now be harvested', harvested === true);
   const queuedItem = game.state.processingQueue[game.state.processingQueue.length - 1];

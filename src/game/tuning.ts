@@ -202,12 +202,20 @@ export const TUNING = {
   SPECIMEN_BUDGET_DELTA_MAX: 5,
   SPECIMEN_BUDGET_CAP: 360, // same absolute cap as breeding's own hidden budget
 
-  // Day 3+ random per-ripened-fruit specimen appearance chance — ONE
-  // mutually-exclusive tier roll per ripening (see Game.maybeGenerateRandomSpecimen).
+  // Day 3+ per-ripened-fruit GLOBAL rarity roll (see Game.ts's fruit-outcome
+  // roll and systems/lineAffinity.ts rollFruitOutcome) — Stage A of the Line
+  // Affinity System: RARE/EPIC use these exact rates (Line-independent, from
+  // their own unlock day); COMMON is simply the complement
+  // (1 - rare - epic), so a fruit always resolves to some visual, never "no
+  // event." SPECIMEN_COMMON_CHANCE is no longer read by that roll (kept only
+  // as a harmless historical constant — a distinct one-off "Common
+  // Specimen" event no longer exists now that ordinary Common fruit already
+  // varies in visual on its own; still referenced by
+  // verify-exceptional-integration.ts's own unrelated regression check).
   SPECIMEN_RANDOM_START_DAY: 3,
-  SPECIMEN_COMMON_CHANCE: 0.003, // 0.30%, from Day 3
-  SPECIMEN_RARE_CHANCE: 0.0005, // 0.05%, from Day 4
-  SPECIMEN_EPIC_CHANCE: 0.00005, // 0.005%, from Day 6
+  SPECIMEN_COMMON_CHANCE: 0.003,
+  SPECIMEN_RARE_CHANCE: 0.0005, // 0.05%, from Day 4 — also the GLOBAL per-fruit Rare rate
+  SPECIMEN_EPIC_CHANCE: 0.00005, // 0.005%, from Day 6 — also the GLOBAL per-fruit Epic rate
 
   // Breed Candidate D's own small "wild miracle" Visual-mutation chance (see
   // breeding.ts pickCandidateVisualId). Revised: D's mutation target is now
@@ -226,18 +234,65 @@ export const TUNING = {
   BREED_IMPROVEMENT_MIN: 2,
   BREED_IMPROVEMENT_MAX: 6,
 
-  // Rare/Epic Mutation Affinity (see systems/specimen.ts
-  // mutationAffinityFor/affinityBonusChance and PROJECT.md "Revise Rare /
-  // Epic Line behavior"). A permanent Rare/Epic Line makes ITS OWN special
-  // Visual (never sibling Rare/Epic ids) more likely to recur as a Day-3+
-  // Orchard Specimen on fields it's planted on — applied as an ADDITIONAL
-  // independent per-ripening chance on top of that Visual's normal
-  // within-tier baseline share, targeting an absolute occurrence rate
-  // roughly this many times the non-affinity baseline. Never stacks by
-  // generation — always exactly this flat multiplier for the Line's own
-  // visualId, however many generations deep.
-  RARE_MUTATION_AFFINITY_MULTIPLIER: 10,
-  EPIC_MUTATION_AFFINITY_MULTIPLIER: 20,
+  // Line Affinity System (see PROJECT.md "Line Affinity System" and
+  // systems/lineAffinity.ts). Superseded the old Rare/Epic Mutation
+  // Affinity, which boosted a Line's own special Visual's ABSOLUTE
+  // occurrence rate (×10/×20) — that broke the invariant below, since it
+  // let a Rare/Epic Line raise its own Rare/Epic odds. Every fruit still
+  // rolls GLOBAL Common/Rare/Epic rarity first, completely unaffected by
+  // the planted Line (see SPECIMEN_RARE_CHANCE/SPECIMEN_EPIC_CHANCE below,
+  // reused as-is for that global roll); a Line only ever biases WHICH
+  // visual is picked WITHIN whichever rarity tier already got rolled.
+  // Signature = the Line's own `visualId`; Common Tendency = `baseVisualId`.
+  // Every other candidate in the rolled tier keeps weight 1.
+  LINE_SIGNATURE_AFFINITY_WEIGHT: 3.0,
+  LINE_COMMON_TENDENCY_WEIGHT: 2.0,
+
+  // ==========================================================
+  // FIELD RARITY MODEL V2 (see PROJECT.md "Field Rarity + Line Affinity
+  // Probability Model V2" and systems/fieldRarityModel.ts). PROBABILITY
+  // ENGINE ONLY — NOT YET WIRED INTO GAMEPLAY. Nothing in Game.ts reads
+  // these constants yet; the two-stage roll actually driving Orchard fruit
+  // is still LINE_SIGNATURE_AFFINITY_WEIGHT/LINE_COMMON_TENDENCY_WEIGHT plus
+  // SPECIMEN_RARE_CHANCE/SPECIMEN_EPIC_CHANCE above, unchanged by this pass.
+  // This block establishes the canonical numbers a later integration pass
+  // will wire in, kept namespaced (FIELD_*/FIRST_RARE_*/REWARDED_*) so they
+  // can never be confused with the currently-live constants above.
+  //
+  // FIELD_RARITY_TABLE — per-Field base Common/Rare/Epic odds, index 0 =
+  // Field 1. Replaces the old day-gated GLOBAL rarity roll: rarity becomes a
+  // function of which Field a fruit grew on, not the calendar day. Each row
+  // sums to 1 within floating-point tolerance. Deliberately a small explicit
+  // table for the current 4-Field prototype, not an interpolated formula.
+  FIELD_RARITY_TABLE: [
+    { common: 0.984, rare: 0.015, epic: 0.001 }, // Field 1
+    { common: 0.9815, rare: 0.017, epic: 0.0015 }, // Field 2
+    { common: 0.9775, rare: 0.02, epic: 0.0025 }, // Field 3
+    { common: 0.9725, rare: 0.024, epic: 0.0035 }, // Field 4
+  ] as const,
+
+  // Within-tier Signature/Common-Tendency weighting for the V2 model —
+  // deliberately modest (1.30/1.15), NOT the old ×3/×2 system above. Every
+  // other visual in the rolled tier keeps weight 1. A visual that is BOTH
+  // the Signature and the Common Tendency (visualId === baseVisualId) gets
+  // only the stronger FIELD_LINE_SIGNATURE_WEIGHT, never both stacked.
+  FIELD_LINE_SIGNATURE_WEIGHT: 1.3,
+  FIELD_LINE_COMMON_TENDENCY_WEIGHT: 1.15,
+
+  // First-Rare discovery protection (retention only; does not apply once
+  // the player has ever found a Rare). Counts consecutive ELIGIBLE rolls
+  // (i.e. rolls where Rare is structurally possible) without a Rare result.
+  // Rolls 1-10 use the Field's normal odds untouched; from roll 11 onward
+  // Rare gains FIRST_RARE_BONUS_PER_MISS per additional miss, taken from
+  // Common only (Epic is never touched); roll 25 guarantees Rare outright.
+  FIRST_RARE_PROTECTION_ROLLS: 10,
+  FIRST_RARE_BONUS_PER_MISS: 0.0075,
+  FIRST_RARE_GUARANTEE_ROLL: 25,
+
+  // Future rewarded-ad rarity boost — probability support only, no ad
+  // SDK/UI in this pass (see PROJECT.md). Multiplies both Rare and Epic;
+  // Common absorbs the difference. Never stacks with itself.
+  REWARDED_RARITY_MULTIPLIER: 1.5,
 
   // Freshness V1 (see PROJECT.md "Freshness" and systems/freshness.ts). A
   // normal apple's genetic Freshness + accumulated Packing wait time are
@@ -300,6 +355,106 @@ export const TUNING = {
     SWEETEN: { sweetness: 0.6, size: 0.1, yieldStat: 0.1, growth: 0.1, freshness: 0.1 },
     GROW_BIG: { sweetness: 0.1, size: 0.6, yieldStat: 0.1, growth: 0.1, freshness: 0.1 },
   },
+
+  // Orchard BGM (see systems/orchardBgm.ts) — sits quietly behind Orchard
+  // ambience/SFX, leaving headroom for wind/leaf sound and gameplay cues
+  // layered on top later. Silence between tracks in the ordered playlist,
+  // not a crossfade.
+  // Mix rebalance pass 1 (browser feedback: BGM too loud relative to
+  // ambience/SFX) — lowered 0.2 -> 0.12. Mix rebalance pass 2 (browser
+  // feedback: still slightly too loud) — 0.12 -> 0.10.
+  ORCHARD_BGM_VOLUME: 0.1,
+  ORCHARD_BGM_GAP_MS: 5000,
+
+  // Orchard leaves/wind ambience (see systems/orchardAmbience.ts) — volume
+  // tracks the SAME shared WindModel signal driving the visual canopy sway
+  // (render/orchardWind.ts), never a separate wind timer. Fade times are
+  // exponential-smoothing time constants (not hard durations) so the loop's
+  // volume can never pop on/off.
+  // Mix rebalance pass 1: 0.12 -> 0.18. Mix rebalance pass 2 (browser
+  // feedback: still too quiet): 0.18 -> 0.30. WindModel linkage, quiet
+  // periods, fade timing, and gust behavior are all unchanged by this —
+  // this only scales the ceiling the smoothed signal fades toward.
+  ORCHARD_LEAVES_MAX_VOLUME: 0.3,
+  ORCHARD_LEAVES_FADE_IN_S: 1.0,
+  ORCHARD_LEAVES_FADE_OUT_S: 1.6,
+
+  // Orchard bird ambience (see systems/orchardAmbience.ts) — completely
+  // independent of WindModel: a randomized quiet interval, then one of the
+  // 3 clips at a subtle volume. Clips longer than the threshold only play a
+  // short excerpt window so a long ambience recording can never dominate.
+  // This shared MIN/MAX range is Bird 01's actual audible range (confirmed
+  // good by browser listening) — Bird 02/03 apply their own multiplier on
+  // top of it instead of this range changing (see
+  // ORCHARD_BIRD_VOLUME_MULTIPLIERS below).
+  ORCHARD_BIRD_INTERVAL_MIN_S: 20,
+  ORCHARD_BIRD_INTERVAL_MAX_S: 50,
+  ORCHARD_BIRD_VOLUME_MIN: 0.11,
+  ORCHARD_BIRD_VOLUME_MAX: 0.17,
+  ORCHARD_BIRD_LONG_CLIP_THRESHOLD_S: 18,
+  ORCHARD_BIRD_EXCERPT_MIN_S: 6,
+  ORCHARD_BIRD_EXCERPT_MAX_S: 15,
+  ORCHARD_BIRD_FADE_MS: 900,
+  // Mix rebalance pass 2 (browser feedback: Bird 01 is already at a good
+  // level; only Bird 02/03 read as too quiet) — a per-clip multiplier
+  // applied on top of the shared MIN/MAX roll above, indexed in the exact
+  // same order as orchardAmbience.ts's own BIRD_KEYS array (01, 02, 03).
+  // Bird 01 stays at its confirmed-good 1.0x (0.11-0.17 unchanged). Mix
+  // rebalance pass 3 (browser feedback: 1.5x still effectively inaudible for
+  // Bird 02/03) — raised further to 2.5x (~0.275-0.425) — still the smallest
+  // clean way to fix just those two without touching the shared range, bird
+  // scheduling interval, random selection, immediate-repeat avoidance,
+  // excerpt handling, or fade timing.
+  ORCHARD_BIRD_VOLUME_MULTIPLIERS: [1.0, 2.5, 2.5] as const,
+
+  // Notification SFX (see ui/modals.ts ToastQueue) — the approved positive
+  // notification sound, played once per "positive" toast presentation.
+  // Mix rebalance pass 1: 0.8 -> 0.9. Mix rebalance pass 2 (browser
+  // feedback: much too loud) — 0.9 -> 0.63 (30% lower).
+  NOTIFICATION_SFX_VOLUME: 0.63,
+
+  // Orchard harvest SFX (see systems/harvestSfx.ts) — a short foliage/
+  // rustle one-shot played only when a harvest is actually accepted
+  // (Game.harvestFruitSlot returns true), never for a rejected/blocked
+  // harvest. Base volume sits below the leaves/bird ambience ceiling above
+  // so a single harvest reads as a physical accent, not a dominant SFX.
+  // Mix rebalance pass 2 (browser feedback: the sound itself is good, just
+  // slightly too loud) — 0.32 -> 0.27. Mix rebalance pass 3 (browser
+  // feedback: still slightly too loud) — 0.27 -> 0.23. Mix rebalance pass 4
+  // (browser feedback: still slightly too loud) — 0.23 -> 0.184 (-20%).
+  HARVEST_SFX_VOLUME: 0.184,
+  // Per-play randomization so repeated/rapid harvests don't sound like the
+  // exact same sample looping — +/-5% playback rate, +/-6% volume.
+  HARVEST_SFX_RATE_JITTER: 0.05,
+  HARVEST_SFX_VOLUME_JITTER: 0.06,
+  // Minimum spacing between two audible harvest voices for direct-click/
+  // sweep harvesting — rapid successive harvests are staggered onto this
+  // grid rather than stacking at the exact same instant.
+  HARVEST_SFX_MIN_SPACING_MS: 55,
+  // Hard ceiling on simultaneously-playing harvest voices — protects
+  // against a same-frame wall of overlapping copies regardless of source.
+  HARVEST_SFX_MAX_CONCURRENT: 4,
+  // HARVEST ALL: gameplay/state resolves immediately; only the audible
+  // rustles are spread across this short window, and the number of actual
+  // voices is capped so a large harvest still reads as one short harvesting
+  // action rather than noise.
+  HARVEST_SFX_BURST_SPREAD_MIN_MS: 250,
+  HARVEST_SFX_BURST_SPREAD_MAX_MS: 400,
+  HARVEST_SFX_BURST_MAX_VOICES: 7,
+  // Mix rebalance pass 2 (browser feedback: the sound is good but slightly
+  // too long — trim only the lingering tail, not the natural body). Each
+  // voice plays this fraction of the SOURCE clip's own decoded duration
+  // (not a fixed ms guess) before fading out, so the initial rustle/body is
+  // fully preserved and only roughly the final 15-20% is cut. Mix rebalance
+  // pass 3 (browser feedback: still slightly too long) — 0.83 -> 0.74.
+  HARVEST_SFX_TAIL_KEEP_FRACTION: 0.74,
+  // Fade applied right at that cut point so stopping the voice early never
+  // produces an audible click. Mix rebalance pass 4 (browser feedback: the
+  // 40ms cut still felt perceptibly abrupt) — lengthened to 120ms with a
+  // Sine.easeOut curve (see harvestSfx.ts) so the tail melts away smoothly
+  // instead of reading as a cut. Keep-fraction (above) is unchanged — this
+  // only softens how the already-decided cut point is approached.
+  HARVEST_SFX_FADE_OUT_MS: 120,
 } as const;
 
 export const COLORS = ['Red', 'Green', 'Yellow', 'Purple'] as const;

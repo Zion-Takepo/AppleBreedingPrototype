@@ -4,6 +4,16 @@ import type { Field, FieldFruitSlot, Variety } from '../types.ts';
 import { effectiveStats } from '../systems/economy.ts';
 import { AppleVisual } from './AppleVisual.ts';
 import { WindModel } from './orchardWind.ts';
+import { SecondarySpring, DEFAULT_SECONDARY_SPRING_TUNING } from './orchardSecondaryMotion.ts';
+import {
+  WindHistoryBuffer,
+  localTurbulenceOffset,
+  WIND_HISTORY_SECONDS,
+  LOCAL_TURBULENCE_FREQ_MIN_HZ,
+  LOCAL_TURBULENCE_FREQ_MAX_HZ,
+} from './orchardWindPropagation.ts';
+import { TREE_RESPONSE_PROFILES, combineLocalDelaySeconds } from './orchardTreeResponseProfiles.ts';
+import { HarvestSfxController } from '../systems/harvestSfx.ts';
 
 // ------------------------------------------------------------------
 // Tuning — Orchard presentation only. None of this affects harvest
@@ -104,6 +114,16 @@ const TREE_LAYOUT: TreeLayoutSlot[] = [
 // 5 trees x 3 slots = 15, matching TUNING.FRUIT_PER_BATCH — decoupled by
 // design (this file is presentation-only), but the two must agree.
 const FRUIT_PER_TREE = 3;
+
+// Actual horizontal span of the five baked trunks (see TREE_LAYOUT's own
+// `x` values above) — used ONLY to normalize each tree's x position to 0..1
+// for wind-propagation delay (see render/orchardWindPropagation.ts). Derived
+// from TREE_LAYOUT itself so it can never drift out of sync with the real
+// layout, and deliberately NOT derived from array index (see PROJECT.md /
+// this pass's spec: index order is back-left, back-right, front-left,
+// center, front-right — not left-to-right spatial order).
+const TREE_X_MIN = Math.min(...TREE_LAYOUT.map((l) => l.x));
+const TREE_X_MAX = Math.max(...TREE_LAYOUT.map((l) => l.x));
 
 // ------------------------------------------------------------------
 // Canopy artwork (see PROJECT.md "Canopy Layer V1" — now implemented, not
@@ -298,22 +318,42 @@ const BAG_REVEAL_MS = 220; // quick fade/pop from EMPTY into BAGGED — no overs
 // Motion Prototype").
 //
 // RETUNE (human feedback: motion too subtle, five trees read as
-// independent pendulums rather than one shared breeze): every tree now
-// reacts to the exact same instantaneous `wind.value` — there is no more
-// per-tree time-shifted sampling of the signal (the old ±2.2s phase offset
-// was large enough, relative to the ~7-11s base breeze period, to visibly
-// desync trees). The ONLY per-tree individuality left is a small amplitude
-// scale and a small response-speed (easing) difference, both rolled once
-// at construction — enough that the five trees don't move in frame-perfect
-// lockstep, not enough to look like separate oscillators. To retune "how
-// strong/fast the breeze feels," change the four constants in this block;
-// there is no other place sway magnitude is computed.
+// independent pendulums rather than one shared breeze): every tree reacted
+// to the exact same instantaneous `wind.value` — no per-tree time-shifted
+// sampling (the old ±2.2s RANDOM phase offset, unrelated to any tree's
+// actual position, was large enough relative to the ~7-11s base breeze
+// period to visibly desync trees into separate-looking oscillators). The
+// only per-tree individuality was a small amplitude scale and a small
+// response-speed (easing) difference, both rolled once at construction.
+//
+// RETUNE 2 (browser feedback: with the above in place, all five trees
+// STILL read as too synchronized — reacting/peaking/settling on the same
+// frame). Root cause: "same instantaneous wind.value" also meant zero
+// spatial lag, so nothing distinguished five trees standing at different
+// points in the same physical orchard. Fix (see
+// render/orchardWindPropagation.ts + TreeNode.updateSway): each tree now
+// eases toward its own DELAYED sample of the shared signal (a rolling
+// history buffer, continuously interpolated — never a stepped per-tree
+// delay), where the delay is derived from that tree's ACTUAL x position and
+// the wind's current broad direction (so propagation order reverses
+// naturally when the dominant gust direction reverses), plus a very small
+// subordinate local-turbulence residual. This is NOT a reversion to RETUNE
+// 1's rejected approach: that was an arbitrary, position-independent random
+// time-shift (~2.2s, comparable to a full breeze cycle) that made trees
+// look like unrelated oscillators; this is a small (<=~0.42s, well under
+// one breeze cycle), physically-grounded propagation delay tied to real
+// orchard geometry, so the shared gust event/direction/rise-fall still
+// obviously reads as one gust. To retune "how strong/fast the breeze
+// feels," change the four constants in this block; there is no other place
+// sway magnitude is computed. To retune propagation timing/turbulence, see
+// the constants at the top of render/orchardWindPropagation.ts instead.
 // ------------------------------------------------------------------
 
-// Canopy (foliage): every tree targets the SAME wind.value, scaled by its
-// own small amplitude variation and eased in at its own small response
-// speed (both rolled ONCE per tree, never rerolled) — the shared direction
-// dominates, per-tree differences stay subtle.
+// Canopy (foliage): every tree targets its OWN local (delayed + turbulent,
+// see render/orchardWindPropagation.ts) sample of the ONE shared wind
+// signal, scaled by its own small amplitude multiplier and eased in at its
+// own response speed — the shared gust event/direction/rise-fall still
+// dominates, per-tree AMPLITUDE differences stay subtle.
 // RETUNE (human visual feedback: overall sway read a little too strong).
 // CANOPY_SWAY_MAX_DEG, CANOPY_DRIFT_MAX_PX, and FRUIT_SWAY_MAX_DEG below
 // all scaled by the same 0.75 factor (2.9->2.175, 5->3.75, 4.2->3.15) —
@@ -328,10 +368,16 @@ const BAG_REVEAL_MS = 220; // quick fade/pop from EMPTY into BAGGED — no overs
 // timing/response-rate ranges untouched: 1.75->1.3125, 3.0->2.25, 2.5->1.875.
 const CANOPY_SWAY_MAX_DEG = 1.3125; // was 1.75 — now 25% smaller
 const CANOPY_DRIFT_MAX_PX = 2.25; // was 3.0 — small horizontal lean alongside the rotation, same direction, same shared signal
-const TREE_AMP_SCALE_MIN = 0.9; // ±10% — was ±18%; kept small so the shared wind stays the obvious primary driver
-const TREE_AMP_SCALE_MAX = 1.1;
-const TREE_RESPONSE_RATE_MIN = 5; // higher = snappier; ~0.05-0.20s settle lag between trees (was ~0.5-0.8s — too slow, read as separate cycles)
-const TREE_RESPONSE_RATE_MAX = 20;
+// RETUNE 4 (five-tree de-synchronization pass — browser feedback: the five
+// trees still read as moving in lockstep after the spatial-propagation pass,
+// because per-tree amplitude/response-speed variation was a RANDOM roll each
+// session, with no guarantee 5 draws actually spread across the range).
+// ampScale/responseRate (and every secondary-spring parameter below) now
+// come from render/orchardTreeResponseProfiles.ts's five FIXED, deterministic
+// per-tree profiles instead — see TreeNode's constructor. This pass is about
+// TIMING/INERTIA/SETTLING differences, not amplitude, so ampScale stays a
+// small ~±5% multiplier (see that module) — the old ±10% random range is
+// gone, not widened.
 
 // Fruit: inherits the canopy's rotation for free (it's a child of the same
 // windPivot) plus its own small secondary pendulum sway, proportional to
@@ -343,6 +389,58 @@ const FRUIT_RESPONSE_RATE_MIN = 4; // slower than canopy's own 5-20 -> ~0.10-0.2
 const FRUIT_RESPONSE_RATE_MAX = 10;
 const FRUIT_AMP_SCALE_MIN = 0.8; // unchanged — small per-fruit variation, never the dominant signal
 const FRUIT_AMP_SCALE_MAX = 1.25;
+
+// ------------------------------------------------------------------
+// Secondary inertial response — small non-rigid-*feeling* motion layered
+// ADDITIVELY on top of the primary sway above (which stays completely
+// unchanged/frozen). Goal: break up the "one rigid painted board" feel with
+// crown inertia — a delayed, slightly-overshooting response to a CHANGE in
+// the shared wind, not a second/independent motion source. See
+// render/orchardSecondaryMotion.ts (SecondarySpring — a small damped
+// spring-mass, pure/unit-testable) for the actual dynamics; everything here
+// just maps its normalized ±1-ish output to how many degrees/pixels of
+// EXTRA rotation/drift/vertical movement a tree (and, faintly, its fruit)
+// gets. A steady, unchanging wind excites nothing (the spring is driven by
+// wind VELOCITY, i.e. frame-to-frame change — see TreeNode.updateSway's own
+// localWindVelocity, derived from that tree's own local wind sample rather
+// than a single shared value computed in sync()), and calm converges back
+// to EXACTLY 0 (SecondarySpring's own snap-to-zero).
+// These are starting ceilings tuned to browser-test against, not values
+// that must always be reached — see PROJECT.md pass notes.
+// ------------------------------------------------------------------
+// RETUNE (restrained secondary-motion pass — browser feedback: trees tilted
+// too far / moved too much once the prior temporary debug amplification
+// (SECONDARY_DEBUG_MULTIPLIER, since removed) was left active outside its
+// own diagnostic test). Pulled back to restrained production ceilings —
+// mass/lag/settling should read as subtle, not as a second visible sway
+// layered on top of the primary wind. Primary sway (CANOPY_SWAY_MAX_DEG /
+// CANOPY_DRIFT_MAX_PX / FRUIT_SWAY_MAX_DEG above) is untouched by this pass.
+const SECONDARY_ROTATION_MAX_DEG = 0.2; // extra rotation ceiling at the strongest transition
+const SECONDARY_DRIFT_MAX_PX = 0.45; // extra horizontal drift ceiling
+const SECONDARY_VERTICAL_MAX_PX = 0.2; // extra vertical inertial-settle ceiling
+// RETUNE 4 (five-tree de-synchronization pass): per-tree secondary spring
+// stiffness/damping/amplitude variation now comes from
+// render/orchardTreeResponseProfiles.ts's five fixed profiles (see
+// TreeNode's constructor) instead of a random ±10% roll — same module also
+// supplies the primary ampScale/responseRate above. These ceilings
+// themselves are unchanged from Pass 1.
+
+// Fruit residual: fruit already inherits the FULL tree rotation (primary +
+// secondary) for free, since it's parented under the same windPivot — this
+// is only the small EXTRA lag/overshoot layered on top of that inheritance,
+// analogous to how FRUIT_SWAY_MAX_DEG already adds onto the inherited
+// primary canopy angle. Kept far smaller than FRUIT_SWAY_MAX_DEG so it
+// reads as a residual settle, never an independent ornament swing.
+const FRUIT_SECONDARY_MAX_DEG = 0.09;
+const FRUIT_SECONDARY_RESPONSE_RATE = 6; // eases toward the tree's secondary rotation — visibly lags behind it by design
+
+// Same devLog/devError-gated-behind-import.meta.env.DEV pattern already
+// used by systems/orchardAmbience.ts, systems/notificationSfx.ts, and
+// systems/harvestSfx.ts — safe to leave in production builds (Vite strips
+// the `if` branch entirely since import.meta.env.DEV is statically false).
+function devLog(...args: unknown[]): void {
+  if (import.meta.env.DEV) console.log('[orchard-secondary]', ...args);
+}
 
 // Direct-harvest tuning.
 const HIT_RADIUS = FRUIT_PIVOT_RADIUS + 16; // slightly larger than the apple itself
@@ -429,6 +527,10 @@ class FruitSlot {
   private swayAngle = 0;
   private readonly swayAmpScale = rand(FRUIT_AMP_SCALE_MIN, FRUIT_AMP_SCALE_MAX);
   private readonly swayResponseRate = rand(FRUIT_RESPONSE_RATE_MIN, FRUIT_RESPONSE_RATE_MAX);
+  // Small residual lag on top of the tree's secondary (inertial) rotation —
+  // see the tuning block's FRUIT_SECONDARY_* comment above. Reuses
+  // swayAmpScale rather than rolling a second per-fruit random value.
+  private secondarySwayAngle = 0;
 
   constructor(scene: Phaser.Scene, offsetX: number, offsetY: number, hooks: HarvestHooks, index: number) {
     this.scene = scene;
@@ -647,16 +749,28 @@ class FruitSlot {
    * that ever touches `angle`. Runs regardless of reveal/harvest state
    * (harmless while invisible) so a fruit never "catches up" or snaps when
    * it reappears.
-   * @param canopyAngleDeg this fruit's own tree's current windPivot angle
-   *   (already includes that tree's own amplitude/response variation); the
-   *   fruit's own slower response rate is what makes it visibly lag behind
-   *   the canopy rather than track it 1:1.
+   * @param canopyAngleDeg this fruit's own tree's current PRIMARY canopy
+   *   angle (already includes that tree's own amplitude/response
+   *   variation); the fruit's own slower response rate is what makes it
+   *   visibly lag behind the canopy rather than track it 1:1.
+   * @param secondaryAngleDeg this fruit's own tree's current EXTRA
+   *   secondary (inertial-spring) rotation — see TreeNode.updateSway. The
+   *   fruit already inherits this in full via the shared windPivot parent
+   *   transform; this parameter only drives a small residual extra lag on
+   *   top of that free inheritance (PROJECT.md "fruit must remain attached
+   *   to the crown" — apples follow the moving crown, then add a very small
+   *   residual inertia of their own).
    */
-  updateSway(canopyAngleDeg: number, dtSeconds: number): void {
+  updateSway(canopyAngleDeg: number, secondaryAngleDeg: number, dtSeconds: number): void {
     const target = (canopyAngleDeg / CANOPY_SWAY_MAX_DEG) * FRUIT_SWAY_MAX_DEG * this.swayAmpScale;
     const alpha = 1 - Math.exp(-this.swayResponseRate * dtSeconds);
     this.swayAngle += (target - this.swayAngle) * alpha;
-    this.pivot.setAngle(this.swayAngle);
+
+    const secondaryTarget = (secondaryAngleDeg / SECONDARY_ROTATION_MAX_DEG) * FRUIT_SECONDARY_MAX_DEG * this.swayAmpScale;
+    const secondaryAlpha = 1 - Math.exp(-FRUIT_SECONDARY_RESPONSE_RATE * dtSeconds);
+    this.secondarySwayAngle += (secondaryTarget - this.secondarySwayAngle) * secondaryAlpha;
+
+    this.pivot.setAngle(this.swayAngle + this.secondarySwayAngle);
   }
 }
 
@@ -675,16 +789,78 @@ class TreeNode {
   private readonly windPivot: Phaser.GameObjects.Container;
   readonly slots: FruitSlot[];
   private canopyAngle = 0;
-  // Rolled ONCE at construction — see the tuning block near the top of this
-  // file. No per-tree phase/time-shift anymore: every tree targets the
-  // exact same wind.value, differing only in how strongly (ampScale) and
-  // how quickly (responseRate) it eases toward that shared target.
-  private readonly ampScale = rand(TREE_AMP_SCALE_MIN, TREE_AMP_SCALE_MAX);
-  private readonly responseRate = rand(TREE_RESPONSE_RATE_MIN, TREE_RESPONSE_RATE_MAX);
+  // This tree's fixed response-character profile (see
+  // render/orchardTreeResponseProfiles.ts's TREE_RESPONSE_PROFILES — one of
+  // five DETERMINISTIC entries, indexed the same way as TREE_LAYOUT, never
+  // rerolled). Every tree targets its OWN local (delayed + turbulent + this
+  // profile's own small timing offset — see updateSway/normalizedX below)
+  // sample of the one shared wind signal, differing further in how strongly
+  // (ampScale) and how quickly (responseRate) it eases toward that local
+  // target. Assigned in the constructor body (needs `treeIndex`, not
+  // available to a field initializer).
+  private readonly ampScale: number;
+  private readonly responseRate: number;
+  // Secondary inertial response (see the tuning block near the top of this
+  // file + render/orchardSecondaryMotion.ts) — one spring per tree, driven
+  // every frame from the SAME shared WindModel's frame-to-frame change
+  // (never its own independent random source). Stiffness/damping/output
+  // amplitude all come from this tree's own fixed profile, so five trees
+  // read as five different, REPRODUCIBLE masses responding to one shared
+  // breeze rather than five identical springs (or a random, non-reproducible
+  // roll — see orchardTreeResponseProfiles.ts's doc comment for why this
+  // pass moved away from Math.random() here).
+  private readonly secondarySpring: SecondarySpring;
+  private readonly secondaryAmpScale: number;
+  // Small additional per-tree reaction lag/lead (seconds) layered on top of
+  // the spatial propagation delay below — see
+  // orchardTreeResponseProfiles.ts's combineLocalDelaySeconds doc comment.
+  private readonly timingOffsetSeconds: number;
+
+  // --- Spatial wind propagation (see render/orchardWindPropagation.ts) ---
+  // This tree's ACTUAL horizontal position normalized 0..1 across the
+  // visible five-tree span (TREE_X_MIN/MAX, derived from TREE_LAYOUT's own
+  // x values) — never derived from treeIndex, which is back/front insertion
+  // order, not left-to-right order (see TREE_LAYOUT's own comments). Set in
+  // the constructor body (needs `layout.x`, not available to a field
+  // initializer).
+  private readonly normalizedX: number;
+  // Small local-turbulence phase/frequency (see localTurbulenceOffset) —
+  // rolled ONCE at construction, never rerolled, so it stays stable for this
+  // tree across the session like every other per-tree variation above.
+  private readonly turbulenceFreqHz = rand(LOCAL_TURBULENCE_FREQ_MIN_HZ, LOCAL_TURBULENCE_FREQ_MAX_HZ);
+  private readonly turbulencePhase = rand(0, Math.PI * 2);
+  // Own running clock for the turbulence sine (independent of the shared
+  // WindModel's internal time) and this tree's own previous LOCAL wind
+  // sample, used to derive this tree's own local wind velocity for its
+  // SecondarySpring (see updateSway) — replaces the old single shared
+  // windVelocity every tree used to receive identically.
+  private localWindTime = 0;
+  private prevLocalWind = 0;
+  private hasPrevLocalWind = false;
 
   constructor(scene: Phaser.Scene, layout: TreeLayoutSlot, hooks: HarvestHooks, treeIndex: number) {
+    this.normalizedX = TREE_X_MAX > TREE_X_MIN ? (layout.x - TREE_X_MIN) / (TREE_X_MAX - TREE_X_MIN) : 0.5;
+    const profile = TREE_RESPONSE_PROFILES[treeIndex];
+    this.ampScale = profile.ampScale;
+    this.responseRate = profile.responseRate;
+    this.secondarySpring = new SecondarySpring({
+      ...DEFAULT_SECONDARY_SPRING_TUNING,
+      stiffness: profile.secondaryStiffness,
+      damping: profile.secondaryDamping,
+    });
+    this.secondaryAmpScale = profile.secondaryAmpScale;
+    this.timingOffsetSeconds = profile.timingOffsetSeconds;
     this.container = scene.add.container(layout.x, layout.groundY);
     this.container.setScale(layout.scale);
+
+    if (import.meta.env.DEV) {
+      // Proves per-tree response variation directly in the console (see
+      // implementation report item "other four trees non-identical
+      // params") — logged once per tree at construction, never repeated.
+      devLog(
+        `tree ${treeIndex} response profile: responseRate=${this.responseRate.toFixed(2)} ampScale=${this.ampScale.toFixed(3)} secondaryStiffness=${profile.secondaryStiffness.toFixed(2)} secondaryDamping=${profile.secondaryDamping.toFixed(2)} secondaryAmpScale=${this.secondaryAmpScale.toFixed(3)} timingOffsetSeconds=${this.timingOffsetSeconds.toFixed(3)}`,
+      );
+    }
 
     // Trunk/roots/ground-shadow are now baked into orchard_background.png
     // (the landscape layer, drawn beneath this whole tree layer) — no
@@ -736,20 +912,70 @@ class TreeNode {
   }
 
   /**
-   * Advances this tree's own canopy sway — eased toward the SAME shared
-   * `wind.value` every tree targets, at this tree's own small
-   * amplitude/response variation — plus a small horizontal drift in the
-   * same direction (both derived from the one shared signal, so they never
-   * disagree), and every one of its fruit's secondary sway. Called once
-   * per real frame from OrchardTreeLayer.sync().
+   * Advances this tree's own canopy sway. Rather than reacting to the
+   * shared WindModel's own instantaneous `value` directly (which is what
+   * made all five trees visibly lock-step — see PROJECT.md's spatial
+   * wind-propagation pass notes), this tree first derives its own LOCAL
+   * wind sample from the shared history buffer: a small delay based on this
+   * tree's ACTUAL x position + the wind's current broad direction, PLUS this
+   * tree's own small fixed timing-offset character trait (see
+   * combineLocalDelaySeconds), plus a small subordinate turbulence residual
+   * (see localTurbulenceOffset). Everything downstream — primary canopy
+   * ease, canopy drift, this tree's own SecondarySpring excitation, and (via
+   * canopyAngle/secondaryRotation passed to FruitSlot.updateSway) this
+   * tree's fruit — is driven from that LOCAL sample, never the raw shared
+   * instant. Called once per real frame from OrchardTreeLayer.sync().
+   * @param wind the ONE shared WindModel — only its current `value` is read
+   *   here, purely to decide this tree's propagation delay's direction (see
+   *   combineLocalDelaySeconds); the actual local sample comes from
+   *   `windHistory` below.
+   * @param windHistory the ONE shared rolling history of wind.value (see
+   *   render/orchardWindPropagation.ts) — recorded once per frame in
+   *   OrchardTreeLayer.sync(), read here by every tree at its own delay.
    */
-  updateSway(wind: WindModel, dtSeconds: number): void {
-    const target = wind.value * CANOPY_SWAY_MAX_DEG * this.ampScale;
+  updateSway(wind: WindModel, windHistory: WindHistoryBuffer, dtSeconds: number): void {
+    this.localWindTime += dtSeconds;
+
+    // Spatial propagation + this tree's own fixed timing-offset character
+    // trait (see render/orchardTreeResponseProfiles.ts's
+    // combineLocalDelaySeconds), plus a small subordinate local-turbulence
+    // residual — see render/orchardWindPropagation.ts doc comments for why
+    // each is bounded/subordinate to the shared signal (never an
+    // independent wind source).
+    const delaySeconds = combineLocalDelaySeconds(this.normalizedX, wind.value, this.timingOffsetSeconds);
+    const delayedWind = windHistory.sampleDelayed(delaySeconds);
+    const turbulence = localTurbulenceOffset(this.localWindTime, this.turbulenceFreqHz, this.turbulencePhase, delayedWind);
+    const localWind = delayedWind + turbulence;
+
+    // Primary — same ceilings as before (CANOPY_SWAY_MAX_DEG/CANOPY_DRIFT_MAX_PX
+    // untouched), now eased toward this tree's own LOCAL wind sample instead
+    // of the raw shared instant.
+    const target = localWind * CANOPY_SWAY_MAX_DEG * this.ampScale;
     const alpha = 1 - Math.exp(-this.responseRate * dtSeconds);
     this.canopyAngle += (target - this.canopyAngle) * alpha;
-    this.windPivot.setAngle(this.canopyAngle);
-    this.windPivot.x = (this.canopyAngle / CANOPY_SWAY_MAX_DEG) * CANOPY_DRIFT_MAX_PX;
-    this.slots.forEach((slot) => slot.updateSway(this.canopyAngle, dtSeconds));
+
+    // This tree's own local wind velocity (rate of change of ITS delayed+
+    // turbulent sample, not the shared instant) — replaces the old single
+    // shared windVelocity every tree used to receive identically, so each
+    // tree's SecondarySpring now naturally de-syncs along with its primary
+    // sway. Same first-frame-spike guard pattern OrchardTreeLayer.sync()
+    // already used for the old shared windVelocity.
+    const localWindVelocity = this.hasPrevLocalWind && dtSeconds > 1e-6 ? (localWind - this.prevLocalWind) / dtSeconds : 0;
+    this.prevLocalWind = localWind;
+    this.hasPrevLocalWind = true;
+
+    // Secondary — small inertial response to LOCAL wind CHANGE, layered
+    // additively on top of the primary target/canopyAngle above (never
+    // replacing it).
+    const secondaryDisp = this.secondarySpring.update(localWindVelocity, dtSeconds);
+    const secondaryRotation = secondaryDisp * SECONDARY_ROTATION_MAX_DEG * this.secondaryAmpScale;
+    const secondaryDriftX = secondaryDisp * SECONDARY_DRIFT_MAX_PX * this.secondaryAmpScale;
+    const secondaryDriftY = secondaryDisp * SECONDARY_VERTICAL_MAX_PX * this.secondaryAmpScale;
+
+    this.windPivot.setAngle(this.canopyAngle + secondaryRotation);
+    this.windPivot.x = (this.canopyAngle / CANOPY_SWAY_MAX_DEG) * CANOPY_DRIFT_MAX_PX + secondaryDriftX;
+    this.windPivot.y = secondaryDriftY;
+    this.slots.forEach((slot) => slot.updateSway(this.canopyAngle, secondaryRotation, dtSeconds));
   }
 }
 
@@ -791,12 +1017,36 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
   // then drags onto fruit still harvests them.
   private sweepActive = false;
   // Single shared ambient wind for the whole Orchard (see render/orchardWind.ts)
-  // — one instance, advanced once per sync() call, sampled by every tree/fruit.
+  // — one instance, advanced once per sync() call. No tree/fruit samples
+  // `wind.value` directly anymore (see the spatial wind-propagation pass —
+  // PROJECT.md notes): each tree instead reads its own delayed/turbulent
+  // LOCAL sample of `windHistory` below (see TreeNode.updateSway), which is
+  // what actually broke the five-tree lockstep motion. `wind.value` itself
+  // is still read in two places only: (1) windIntensity below, for the
+  // ambience audio, and (2) as the ONLY input to each tree's own
+  // computePropagationDelaySeconds call, purely to pick which way the
+  // dominant gust is currently blowing.
   private wind = new WindModel();
+  // Rolling history of the ONE shared wind.value (see
+  // render/orchardWindPropagation.ts) — recorded once per sync() call, read
+  // by every tree at its own delay. This (not a per-tree prevWindValue diff)
+  // is what now supplies each tree's own local wind sample/velocity.
+  private windHistory = new WindHistoryBuffer(WIND_HISTORY_SECONDS);
+  // Harvest rustle SFX (see systems/harvestSfx.ts) — one controller for this
+  // layer's whole lifetime, fed from the SAME `hooks.attemptHarvest` choke
+  // point every harvest route (direct click, sweep, HARVEST ALL) already
+  // shares, so it never needs its own separate hook-up per route.
+  private harvestSfx: HarvestSfxController;
+  // True only while harvestAllRemaining() is looping — lets the shared hook
+  // below tell a HARVEST ALL batch apart from an ordinary click/sweep
+  // harvest so the two can use different SFX pacing (see harvestAllRemaining).
+  private harvestingAll = false;
+  private harvestAllSuccessCount = 0;
 
   constructor(scene: Phaser.Scene, game: Game) {
     super(scene, 0, 0);
     this.game = game;
+    this.harvestSfx = new HarvestSfxController(scene);
 
     // Harvesting never awards cash directly — it only enqueues the apple
     // onto the shared farm-wide processing queue (see Game.harvestFruitSlot
@@ -804,11 +1054,24 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     // separately, from Game's 'shipment' events (see OrchardScreen).
     // Game.harvestFruitSlot's own boolean return is passed straight
     // through so FruitSlot can decline the pop animation when the Packing
-    // Box is full (see PROJECT.md "Shipping Infrastructure").
+    // Box is full (see PROJECT.md "Shipping Infrastructure") — and only a
+    // TRUE (harvest actually accepted) ever triggers the harvest SFX below,
+    // so a blocked/rejected harvest (Packing full) stays silent.
     const hooks: HarvestHooks = {
       attemptHarvest: (slotIndex: number) => {
         if (!this.currentField) return false;
-        return this.game.harvestFruitSlot(this.currentField.id, slotIndex);
+        const harvested = this.game.harvestFruitSlot(this.currentField.id, slotIndex);
+        if (harvested) {
+          if (this.harvestingAll) {
+            // Deferred: harvestAllRemaining() plays one staggered burst for
+            // the whole batch once the loop finishes, rather than one voice
+            // per apple here.
+            this.harvestAllSuccessCount++;
+          } else {
+            this.harvestSfx.playHarvest();
+          }
+        }
+        return harvested;
       },
     };
 
@@ -843,9 +1106,22 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     });
   }
 
-  /** HARVEST ALL convenience button: pops every currently ripe fruit (zero, some, or all 15) — does not require the full 15 to be ripe. */
+  /**
+   * HARVEST ALL convenience button: pops every currently ripe fruit (zero,
+   * some, or all 15) — does not require the full 15 to be ripe. Every
+   * individual harvest's state/economy/animation is completely unaffected
+   * by the SFX batching below (see PROJECT.md "Harvest visual
+   * compatibility") — only the audible rustle for the whole batch is
+   * deferred to one short staggered burst (see systems/harvestSfx.ts
+   * playBurst) instead of one voice per apple, so a large harvest reads as
+   * one short harvesting action rather than a wall of overlapping copies.
+   */
   harvestAllRemaining(): void {
+    this.harvestingAll = true;
+    this.harvestAllSuccessCount = 0;
     this.allSlots.forEach((slot) => slot.attemptHarvest());
+    this.harvestingAll = false;
+    if (this.harvestAllSuccessCount > 0) this.harvestSfx.playBurst(this.harvestAllSuccessCount);
   }
 
   /** Verification-only: count of currently-revealed fruit slots, used by browser-driven checks. Not used by any gameplay path. */
@@ -899,14 +1175,17 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
       // (Specimen appeared/was harvested, or a hard field/variety switch),
       // not every frame.
       const specimen = s.specimen;
-      // Ordinary fruit always shows the Line's stable baseVisualId, never
-      // its special identity visualId — a Rare/Epic lineage grows its
-      // ordinary baseVisualId crop, with its own special Visual only ever
-      // appearing as a physical Specimen fruit (see PROJECT.md "Revise
-      // Rare / Epic Line behavior").
-      const visualId = specimen ? specimen.visualId : variety.baseVisualId;
+      // A Rare/Epic-tier fruit-outcome roll always becomes a physical
+      // Specimen — shows that Specimen's own visual/size. Otherwise this is
+      // ordinary Common-tier fruit: shows its own PERSISTED rolled visual
+      // (`s.commonVisualId`, see types.ts's FieldFruitSlot doc comment),
+      // falling back to the planted Line's own `baseVisualId` only while
+      // growing/inactive or for fruit ripened before the Line Affinity
+      // System's roll ever runs (see PROJECT.md "Line Affinity System") —
+      // never re-derived from `variety.visualId` every frame.
+      const visualId = specimen ? specimen.visualId : (s.commonVisualId ?? variety.baseVisualId);
       const size = specimen ? specimen.size : eff.size;
-      const key = specimen ? `specimen:${specimen.id}` : `line:${variety.id}:${Math.round(size)}`;
+      const key = specimen ? `specimen:${specimen.id}` : `line:${variety.id}:${visualId}:${Math.round(size)}`;
       if (hardReset || this.lastSlotVisualKey[i] !== key) {
         slot.setTraits(visualId, size);
         // Genetic Exceptional fruit is a normal production visual (see
@@ -938,17 +1217,41 @@ export class OrchardTreeLayer extends Phaser.GameObjects.Container {
     });
 
     // Ambient wind — advanced once here (never per-tree) so every tree/fruit
-    // samples the exact same underlying signal; only ticks while sync() is
-    // being called, i.e. while Orchard is relevant and the farm isn't
-    // paused for Breed (see MainScene.update()), matching every other
-    // Orchard-presentation timer in this file.
+    // ultimately derives from the exact same underlying signal; only ticks
+    // while sync() is being called, i.e. while Orchard is relevant and the
+    // farm isn't paused for Breed (see MainScene.update()), matching every
+    // other Orchard-presentation timer in this file. The shared value is
+    // then recorded into windHistory so each tree can sample its own
+    // delayed LOCAL version of it (see TreeNode.updateSway +
+    // render/orchardWindPropagation.ts) — this replaces the old approach of
+    // handing every tree the exact same instantaneous value/velocity, which
+    // was the actual cause of the five trees reading as synchronized.
     this.wind.update(dtSeconds);
-    this.trees.forEach((tree) => tree.updateSway(this.wind, dtSeconds));
+    this.windHistory.record(dtSeconds, this.wind.value);
+    this.trees.forEach((tree) => tree.updateSway(this.wind, this.windHistory, dtSeconds));
     this.lastIdentityKey = identityKey;
   }
 
   /** DEV-only: skips straight to the next wind gust instead of waiting out its scheduled interval, so a browser check doesn't need to wait 10-25s. Never called from production/gameplay code. */
   debugTriggerWindGust(): void {
     this.wind.debugTriggerGust();
+  }
+
+  /**
+   * Normalized ambient wind intensity (~0..1, briefly higher during a gust
+   * peak) sampled from the exact SAME shared `WindModel` instance driving
+   * every tree's visual canopy sway above — never a second/duplicate wind
+   * simulation. Consumed by the Orchard leaves ambience audio (see
+   * systems/orchardAmbience.ts), which owns its own volume smoothing; this
+   * getter only exposes the raw signal.
+   */
+  get windIntensity(): number {
+    return Math.abs(this.wind.value);
+  }
+
+  /** Stops any pending staggered harvest-SFX voices — called automatically by Phaser as part of the owning OrchardScreen Container's own destroy() (children are destroyed by default; see Container.exclusive). */
+  override destroy(fromScene?: boolean): void {
+    this.harvestSfx.destroy();
+    super.destroy(fromScene);
   }
 }

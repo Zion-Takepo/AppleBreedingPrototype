@@ -27,18 +27,8 @@ import { TUNING } from '../src/game/tuning.ts';
 import type { AppleAssetId } from '../src/game/render/appleAssets.ts';
 import { APPLE_RARITY } from '../src/game/render/appleAssets.ts';
 import { breedOffspring, type BreedParent, type Stats5 } from '../src/game/systems/breeding.ts';
-import {
-  affinityBonusChance,
-  basePerSpecificChance,
-  chooseDay2GuaranteedVisual,
-  chooseGuaranteedSpecimenFieldIndex,
-  deriveSpecimenBaseVisualId,
-  generateSpecimenStats,
-  mutationAffinityFor,
-  pickOrchardSpecimenVisual,
-  rollOrchardSpecimen,
-  rollSpecimenTier,
-} from '../src/game/systems/specimen.ts';
+import { chooseDay2GuaranteedVisual, chooseGuaranteedSpecimenFieldIndex, deriveSpecimenBaseVisualId, generateSpecimenStats } from '../src/game/systems/specimen.ts';
+import { commonTendencyConditionalPct, pickTierVisual, rollFruitOutcome, rollGlobalRarity, signatureConditionalPct } from '../src/game/systems/lineAffinity.ts';
 import { marketMultiplierForVisual } from '../src/game/systems/market.ts';
 import { Game } from '../src/game/Game.ts';
 import { STARTER_GREEN, STARTER_RED } from '../src/game/systems/starterLines.ts';
@@ -162,8 +152,36 @@ function countAllSpecimensInPlay(game: Game): number {
   assert('Day 1 guaranteed Specimen is COMMON · #002 (C2)', day1SpecimenSlots[0]?.specimen?.visualId === 'C2');
   assert('Day 1 guaranteed Specimen is already ripe (visible in the Orchard immediately)', day1SpecimenSlots[0]?.ripe === true);
   assert('Day 1 produces no random additional specimens (only the one guarantee)', countAllSpecimensInPlay(game) === 1);
-  assert('rollSpecimenTier never fires on Day 1 (pure function, many trials)', Array.from({ length: 500 }, () => rollSpecimenTier(1)).every((t) => t === null));
-  assert('rollSpecimenTier never fires on Day 2 (pure function, many trials)', Array.from({ length: 500 }, () => rollSpecimenTier(2)).every((t) => t === null));
+
+  // The Line Affinity System's two-stage fruit-outcome roll (see
+  // systems/lineAffinity.ts) is gated on SPECIMEN_RANDOM_START_DAY (3) —
+  // proven here at the REAL gameplay layer (Game.update()'s ripening block)
+  // rather than a pure-function call, since rollGlobalRarity/rollFruitOutcome
+  // themselves always resolve to SOME tier (no more "did nothing" null case)
+  // and so can't demonstrate "never fires" on their own. Math.random is
+  // pinned to 0 — a value that would deterministically win EVERY roll
+  // (global rarity AND the Exceptional occurrence roll) on a later day — so
+  // if anything at all fired here on Day 1/2, it would.
+  {
+    const originalRandom = Math.random;
+    Math.random = () => 0;
+    try {
+      for (const field of game.state.fields) {
+        for (const slot of field.slots) {
+          if (slot.active && !slot.ripe) {
+            slot.timer = 0.0001;
+          }
+        }
+      }
+      game.update(0.001);
+    } finally {
+      Math.random = originalRandom;
+    }
+  }
+  assert(
+    'the two-stage fruit-outcome roll (and the Exceptional roll) never fire before Day 3, even with every ripening fruit forced ripe and rng pinned to always-win',
+    countAllSpecimensInPlay(game) === 1,
+  );
 
   // Reload cannot duplicate the Day 1 guarantee.
   game.save();
@@ -251,148 +269,162 @@ function countAllSpecimensInPlay(game: Game): number {
 }
 
 // ===========================================================================
-// DAY 3+ RANDOM APPEARANCE
+// DAY 3+ RANDOM APPEARANCE — Stage A (rollGlobalRarity) / Stage B
+// (pickTierVisual) of the Line Affinity System (see systems/lineAffinity.ts
+// and PROJECT.md "Line Affinity System"). Common is now the deterministic
+// COMPLEMENT of Rare+Epic (always resolves to SOME tier — there is no more
+// "no event" null outcome the old rollSpecimenTier had), so these checks
+// test tier RESOLUTION, not "did anything happen at all."
 // ===========================================================================
 {
-  assert('Day 3: Rare never appears (base rate is 0 before Day 4)', TUNING.SPECIMEN_RARE_CHANCE > 0 && rollSpecimenTier(3, constRng(TUNING.SPECIMEN_COMMON_CHANCE + 0.0001)) === null);
-  assert('Day 3: Common can appear at the configured rate', rollSpecimenTier(3, constRng(TUNING.SPECIMEN_COMMON_CHANCE * 0.5)) === 'COMMON');
-  assert('Day 4: Rare cannot appear before Day 4 (already proven by the Day 3 check above) — Day 4 Rare CAN appear', rollSpecimenTier(4, constRng(TUNING.SPECIMEN_RARE_CHANCE * 0.5)) === 'RARE');
-  assert('Day 5: Epic cannot appear before Day 6', rollSpecimenTier(5, constRng(TUNING.SPECIMEN_EPIC_CHANCE * 0.5)) !== 'EPIC');
-  assert('Day 6: Epic can appear from Day 6 onward', rollSpecimenTier(6, constRng(TUNING.SPECIMEN_EPIC_CHANCE * 0.5)) === 'EPIC');
+  assert('Day 3: Rare never appears (base rate is 0 before Day 4) — resolves to COMMON regardless of rng', rollGlobalRarity(3, constRng(0.00001)) === 'COMMON');
+  assert('Day 3: Epic never appears either (locked until Day 6)', rollGlobalRarity(3, constRng(0.000001)) === 'COMMON');
+  assert('Day 4: Rare cannot appear before Day 4 (already proven by the Day 3 check above) — Day 4 Rare CAN appear', rollGlobalRarity(4, constRng(TUNING.SPECIMEN_RARE_CHANCE * 0.5)) === 'RARE');
+  assert('Day 5: Epic cannot appear before Day 6', rollGlobalRarity(5, constRng(TUNING.SPECIMEN_EPIC_CHANCE * 0.5)) !== 'EPIC');
+  assert('Day 6: Epic can appear from Day 6 onward', rollGlobalRarity(6, constRng(TUNING.SPECIMEN_EPIC_CHANCE * 0.5)) === 'EPIC');
 
   // A single fruit can never become multiple tiers — structural (one
-  // sequential if/else returning at most one tier) plus a statistical
-  // sanity pass confirming the empirical mix roughly matches the tuned
-  // per-tier rates at Day 6 (all three tiers simultaneously active).
+  // sequential if/else returning exactly one tier, always) plus a
+  // statistical sanity pass confirming the empirical mix roughly matches
+  // the tuned per-tier rates at Day 6 (all three tiers simultaneously
+  // active). Common's rate is the COMPLEMENT of Rare+Epic — NOT
+  // SPECIMEN_COMMON_CHANCE, which is unrelated/vestigial under this model
+  // (see tuning.ts's own comment on that constant).
   const rng = mulberry32(20260816);
   const N = 400000;
   let common = 0;
   let rare = 0;
   let epic = 0;
-  let none = 0;
   for (let i = 0; i < N; i++) {
-    const t = rollSpecimenTier(6, rng);
+    const t = rollGlobalRarity(6, rng);
     if (t === 'COMMON') common++;
     else if (t === 'RARE') rare++;
     else if (t === 'EPIC') epic++;
-    else none++;
   }
-  assert('every roll is exactly one outcome (Common/Rare/Epic/none), never combined', common + rare + epic + none === N);
-  assert(`Day 6 Common rate ~matches TUNING (${common}/${N})`, Math.abs(common / N - TUNING.SPECIMEN_COMMON_CHANCE) < 0.0006);
+  assert('every roll is exactly one outcome (Common/Rare/Epic), never combined, never none', common + rare + epic === N);
+  const expectedCommon = 1 - TUNING.SPECIMEN_RARE_CHANCE - TUNING.SPECIMEN_EPIC_CHANCE;
+  assert(`Day 6 Common rate ~matches the complement of Rare+Epic (${common}/${N}, expected ~${(expectedCommon * 100).toFixed(3)}%)`, Math.abs(common / N - expectedCommon) < 0.002);
   assert(`Day 6 Rare rate ~matches TUNING (${rare}/${N})`, Math.abs(rare / N - TUNING.SPECIMEN_RARE_CHANCE) < 0.0003);
   assert(`Day 6 Epic rate ~matches TUNING (${epic}/${N})`, Math.abs(epic / N - TUNING.SPECIMEN_EPIC_CHANCE) < 0.0002);
 
-  // Selected Visual always differs from the source Line, and rarity never buys stat budget.
-  const visual = pickOrchardSpecimenVisual('EPIC', 6, 'E1', [], constRng(0));
-  assert('Day 3+ random specimen Visual always differs from the planted source Line (Epic pool of 2, excluding source leaves exactly 1)', visual === 'E2');
-  const noAlt = pickOrchardSpecimenVisual('EPIC', 6, 'E1', [], constRng(0)); // still E2 (pool size 1 regardless of rng)
-  assert('deterministic when only one alternate exists', noAlt === 'E2');
+  // Stage B (pickTierVisual) reaches every candidate in a tier — the old
+  // "always differs from the source Line's own baseVisualId" exclusion rule
+  // is GONE under this model (Stage B only ever weights, never excludes).
+  // With no Signature/Common-Tendency match anywhere in the pool, every
+  // candidate has weight 1, so rng=0 deterministically picks the pool's
+  // first entry (E1) — proving the Epic tier's own candidates are reachable
+  // via pickTierVisual with no special-case exclusion logic left over.
+  const visual = pickTierVisual('EPIC', 6, 'C1', 'C1', constRng(0));
+  assert('Stage B (pickTierVisual) reaches the Epic pool with no source-exclusion left over (rng=0 -> pool[0] = E1)', visual === 'E1');
 }
 
 // ===========================================================================
-// AFFINITY (Rare x10 / Epic x20 Mutation Affinity — see PROJECT.md "Revise
-// Rare / Epic Line behavior")
+// LINE AFFINITY (see PROJECT.md "Line Affinity System", section 16's
+// GAME-BALANCE RULE, and section 20's verification requirements A-D).
+// Replaces the old ×10/×20 absolute-rate Mutation Affinity, which directly
+// violated the new invariant below by letting a Line raise its OWN
+// Rare/Epic odds. Under this model, Line Affinity ONLY ever reweights WHICH
+// visual is picked WITHIN an already-rolled, Line-independent tier.
 // ===========================================================================
 {
-  assert('Common Lines have no Mutation Affinity', mutationAffinityFor('C1') === null);
-  const rareAffinity = mutationAffinityFor('R2');
-  assert(
-    "a Rare Line grants Rare x10 affinity for its OWN visual only",
-    rareAffinity?.tier === 'RARE' && rareAffinity.visualId === 'R2' && rareAffinity.multiplier === TUNING.RARE_MUTATION_AFFINITY_MULTIPLIER,
-  );
-  const epicAffinity = mutationAffinityFor('E1');
-  assert(
-    "an Epic Line grants Epic x20 affinity for its OWN visual only",
-    epicAffinity?.tier === 'EPIC' && epicAffinity.visualId === 'E1' && epicAffinity.multiplier === TUNING.EPIC_MUTATION_AFFINITY_MULTIPLIER,
-  );
-  assert(
-    "affinity never stacks by generation — it's a pure function of the Line's own visualId alone (no generation input exists to stack), stable across repeated calls",
-    mutationAffinityFor('R2')?.multiplier === TUNING.RARE_MUTATION_AFFINITY_MULTIPLIER && mutationAffinityFor('R2')?.multiplier === rareAffinity?.multiplier,
-  );
-
-  // Day-gating: affinity can never bypass the tier's own unlock day.
-  assert('Rare affinity bonus is locked before Day 4', affinityBonusChance('RARE', 3, 10) === 0);
-  assert('Rare affinity bonus is active from Day 4', affinityBonusChance('RARE', 4, 10) > 0);
-  assert('Epic affinity bonus is locked before Day 6', affinityBonusChance('EPIC', 5, 20) === 0);
-  assert('Epic affinity bonus is active from Day 6', affinityBonusChance('EPIC', 6, 20) > 0);
-
-  // Absolute-rate math matches PROJECT.md's worked example exactly: the
-  // bonus is baseline*(multiplier-1), ADDITIONAL to (never replacing) the
-  // normal within-tier baseline share.
-  const rareBase = basePerSpecificChance('RARE', 4); // 0.05% / 4 visuals = 0.0125%
-  const rareBonus = affinityBonusChance('RARE', 4, TUNING.RARE_MUTATION_AFFINITY_MULTIPLIER);
-  assert(
-    `Rare affinity bonus == baseline*(10-1) exactly (base=${(rareBase * 100).toFixed(4)}%, bonus=${(rareBonus * 100).toFixed(4)}%)`,
-    Math.abs(rareBonus - rareBase * 9) < 1e-12,
-  );
-  const epicBase = basePerSpecificChance('EPIC', 6); // 0.005% / 2 visuals = 0.0025%
-  const epicBonus = affinityBonusChance('EPIC', 6, TUNING.EPIC_MUTATION_AFFINITY_MULTIPLIER);
-  assert(
-    `Epic affinity bonus == baseline*(20-1) exactly (base=${(epicBase * 100).toFixed(4)}%, bonus=${(epicBonus * 100).toFixed(4)}%)`,
-    Math.abs(epicBonus - epicBase * 19) < 1e-12,
-  );
-
-  // rollOrchardSpecimen always yields AT MOST one Specimen per call.
-  let allSingleOrNull = true;
-  for (let i = 0; i < 2000; i++) {
-    const roll = rollOrchardSpecimen(6, 'C1', 'R2', []);
-    if (roll !== null && (typeof roll.tier !== 'string' || typeof roll.visualId !== 'string')) allSingleOrNull = false;
+  // A. GLOBAL RARITY INVARIANCE — changing a Line's Signature from Common to
+  // Rare/Epic must NOT change the Stage A tier-roll distribution at all.
+  // Same seeded rng stream fed into rollFruitOutcome for an R2-signature
+  // Line vs. a plain C1-signature Line; the TIER mix must match statistically.
+  {
+    const N = 200000;
+    const rngA = mulberry32(90001);
+    const rngB = mulberry32(90001); // identical seed -> identical rng stream
+    let commonA = 0;
+    let rareA = 0;
+    let epicA = 0;
+    let commonB = 0;
+    let rareB = 0;
+    let epicB = 0;
+    for (let i = 0; i < N; i++) {
+      const a = rollFruitOutcome(6, 'R2', 'C1', rngA); // R2-signature Line
+      if (a.tier === 'COMMON') commonA++;
+      else if (a.tier === 'RARE') rareA++;
+      else epicA++;
+      const b = rollFruitOutcome(6, 'C1', 'C1', rngB); // plain Common-signature Line
+      if (b.tier === 'COMMON') commonB++;
+      else if (b.tier === 'RARE') rareB++;
+      else epicB++;
+    }
+    assert(
+      `an R2-signature Line's tier distribution matches a plain Common Line's EXACTLY (Common ${commonA}/${commonB}, Rare ${rareA}/${rareB}, Epic ${epicA}/${epicB}) — Stage A consumes rng identically regardless of Signature`,
+      commonA === commonB && rareA === rareB && epicA === epicB,
+    );
   }
-  assert('rollOrchardSpecimen always yields at most one Specimen per ripening, never a combined/multi result', allSingleOrNull);
 
-  // Tier-gate holds end-to-end through rollOrchardSpecimen too, even with
-  // an active matching affinity.
+  // B. SIGNATURE WEIGHTING — exact conditional percentages within a tier,
+  // matching PROJECT.md's worked examples precisely.
+  assert('R2-signature: exact Rare-tier conditional probability is 50% (weight 3 of 3+1+1+1)', Math.abs(signatureConditionalPct('R2', 4) - 0.5) < 1e-9);
+  assert('E1-signature: exact Epic-tier conditional probability is 75% (weight 3 of 3+1)', Math.abs(signatureConditionalPct('E1', 6) - 0.75) < 1e-9);
+  {
+    const N = 400000;
+    const rng = mulberry32(11111);
+    let r2Count = 0;
+    for (let i = 0; i < N; i++) {
+      if (pickTierVisual('RARE', 4, 'R2', 'C1', rng) === 'R2') r2Count++;
+    }
+    assert(`R2-signature Rare-tier pick rate ~matches 50% statistically (${r2Count}/${N})`, Math.abs(r2Count / N - 0.5) < 0.01);
+
+    const rng2 = mulberry32(22222);
+    let e1Count = 0;
+    for (let i = 0; i < N; i++) {
+      if (pickTierVisual('EPIC', 6, 'E1', 'C1', rng2) === 'E1') e1Count++;
+    }
+    assert(`E1-signature Epic-tier pick rate ~matches 75% statistically (${e1Count}/${N})`, Math.abs(e1Count / N - 0.75) < 0.01);
+  }
+
+  // C. COMMON TENDENCY — R2-signature + C1-commonTendency: weights
+  // C1=2,C2=1,C3=1,C4=1 -> C1 picked 40% of Common outcomes exactly.
+  assert('Common Tendency exact conditional probability is 40% (weight 2 of 2+1+1+1)', Math.abs(commonTendencyConditionalPct(4) - 0.4) < 1e-9);
+  {
+    const N = 400000;
+    const rng = mulberry32(33333);
+    let c1Count = 0;
+    for (let i = 0; i < N; i++) {
+      if (pickTierVisual('COMMON', 4, 'R2', 'C1', rng) === 'C1') c1Count++;
+    }
+    assert(`R2-signature/C1-tendency Common-tier pick rate ~matches 40% statistically (${c1Count}/${N})`, Math.abs(c1Count / N - 0.4) < 0.01);
+  }
+
+  // D. SAME COMMON SIGNATURE/BASE — visualId===baseVisualId==='C1': weight
+  // must be 3 (the stronger Signature weight alone), NEVER 3+2=5 or ×2=6.
+  // 3/(3+1+1+1)=50%, NOT the ~66% a summed/multiplied weight of 6 would give.
+  {
+    const N = 400000;
+    const rng = mulberry32(44444);
+    let c1Count = 0;
+    for (let i = 0; i < N; i++) {
+      if (pickTierVisual('COMMON', 4, 'C1', 'C1', rng) === 'C1') c1Count++;
+    }
+    const rate = c1Count / N;
+    assert(
+      `a Common-signature Line (visualId===baseVisualId==='C1') gets weight 3 ONLY, never 3+2 summed or 3×2 multiplied (observed ${(rate * 100).toFixed(1)}%, expected ~50%, NOT ~66% or ~85%)`,
+      Math.abs(rate - 0.5) < 0.01,
+    );
+  }
+
+  // Tier-gate holds end-to-end through rollFruitOutcome too, even with a
+  // strongly-matching Signature — Line Affinity can never bypass the day
+  // gates that already exist for Rare/Epic unlock.
   {
     let sawRareAtDay3 = false;
     const rng = mulberry32(31337);
     for (let i = 0; i < 200000; i++) {
-      if (rollOrchardSpecimen(3, 'C1', 'R2', [], rng)?.tier === 'RARE') sawRareAtDay3 = true;
+      if (rollFruitOutcome(3, 'R2', 'C1', rng).tier === 'RARE') sawRareAtDay3 = true;
     }
-    assert('Rare affinity cannot produce Rare before Day 4 end-to-end (tier-gate respected even with affinity active)', !sawRareAtDay3);
+    assert('an R2-signature Line cannot produce Rare before Day 4 end-to-end (tier-gate respected even with a matching Signature)', !sawRareAtDay3);
 
     let sawEpicAtDay5 = false;
     const rng2 = mulberry32(31338);
     for (let i = 0; i < 200000; i++) {
-      if (rollOrchardSpecimen(5, 'C1', 'E1', [], rng2)?.tier === 'EPIC') sawEpicAtDay5 = true;
+      if (rollFruitOutcome(5, 'E1', 'C1', rng2).tier === 'EPIC') sawEpicAtDay5 = true;
     }
-    assert('Epic affinity cannot produce Epic before Day 6 end-to-end (tier-gate respected even with affinity active)', !sawEpicAtDay5);
-  }
-
-  // Absolute occurrence rate, end-to-end: an affinity lineage's OWN Rare
-  // visual should occur roughly 10x as often as the exact same visual does
-  // on a non-affinity lineage — and sibling Rare visuals must NOT be
-  // boosted at all (affinity applies only to the matching special visual).
-  {
-    const day = 4;
-    const N = 1000000;
-    const rngAffinity = mulberry32(555001);
-    const rngBaseline = mulberry32(555002);
-
-    const affinityCounts: Record<string, number> = {};
-    for (let i = 0; i < N; i++) {
-      const roll = rollOrchardSpecimen(day, 'C1', 'R2', [], rngAffinity); // planted Line IS the R2 lineage
-      if (roll) affinityCounts[roll.visualId] = (affinityCounts[roll.visualId] ?? 0) + 1;
-    }
-    const baselineCounts: Record<string, number> = {};
-    for (let i = 0; i < N; i++) {
-      const roll = rollOrchardSpecimen(day, 'C1', 'C1', [], rngBaseline); // ordinary Common lineage, no affinity at all
-      if (roll) baselineCounts[roll.visualId] = (baselineCounts[roll.visualId] ?? 0) + 1;
-    }
-
-    const affinityR2Rate = (affinityCounts['R2'] ?? 0) / N;
-    const baselineR2Rate = (baselineCounts['R2'] ?? 0) / N;
-    assert(
-      `affinity increases the ABSOLUTE occurrence chance of the matching Visual by roughly 10x, not merely its within-tier weight (affinity=${affinityCounts['R2'] ?? 0}, baseline=${baselineCounts['R2'] ?? 0} of ${N})`,
-      baselineR2Rate > 0 && affinityR2Rate / baselineR2Rate > 6 && affinityR2Rate / baselineR2Rate < 15,
-    );
-
-    let siblingsMatchBaseline = true;
-    for (const id of ['R1', 'R3', 'R4'] as AppleAssetId[]) {
-      const a = (affinityCounts[id] ?? 0) / N;
-      const b = (baselineCounts[id] ?? 0) / N;
-      if (b > 0 && (a / b < 0.5 || a / b > 2)) siblingsMatchBaseline = false;
-    }
-    assert('affinity applies ONLY to the matching special Visual — sibling Rare Visuals (R1/R3/R4) stay at their normal, unboosted baseline rate', siblingsMatchBaseline);
+    assert('an E1-signature Line cannot produce Epic before Day 6 end-to-end (tier-gate respected even with a matching Signature)', !sawEpicAtDay5);
   }
 }
 
@@ -1019,6 +1051,12 @@ function countAllSpecimensInPlay(game: Game): number {
   assert('old save without guarantee flags backfills them false', migrated.state.day1SpecimenGuaranteeUsed === false && migrated.state.day2SpecimenGuaranteeUsed === false);
   assert('old save on Day 3 does NOT retroactively fabricate a Day 1/2 guarantee', migrated.state.fields.every((f) => f.slots.every((s) => s.specimen === null)));
   assert('old per-slot data backfills `specimen: null` on every existing slot', migrated.state.fields[0].slots.every((s) => s.specimen === null));
+  // Line Affinity System (see PROJECT.md "Line Affinity System"): a save
+  // from before this pass has no `commonVisualId` at all — backfills null
+  // (never fabricates a historical roll), and since none of these slots are
+  // ripe (`ripe: false` above), the "already-RIPE legacy fruit" backfill
+  // path never fires either.
+  assert('old per-slot data backfills `commonVisualId: null` on every existing slot', migrated.state.fields[0].slots.every((s) => s.commonVisualId === null));
 }
 
 // Old-save migration backfills baseVisualId specifically (see PROJECT.md section 17).

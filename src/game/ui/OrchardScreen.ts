@@ -9,9 +9,12 @@ import { LAYOUT, ORCHARD, THEME } from './theme.ts';
 import { Button, orchardFrame, text as mkText } from './uiKit.ts';
 import { ToastQueue } from './modals.ts';
 import { openVarietyPickerModal } from './varietyPicker.ts';
-import { catalogLabel } from '../render/appleAssets.ts';
+import { APPLE_RARITY, catalogLabel } from '../render/appleAssets.ts';
 import { openShippingInfraModal } from './ShippingInfraModal.ts';
 import { createStatInfoButton } from './StatHelpModal.ts';
+import { OrchardBgmController } from '../systems/orchardBgm.ts';
+import { OrchardAmbienceController } from '../systems/orchardAmbience.ts';
+import { playNotificationSfx } from '../systems/notificationSfx.ts';
 
 // ------------------------------------------------------------------
 // Orchard UI redesign (see PROJECT.md "Orchard UI redesign") — final
@@ -132,13 +135,22 @@ const BG_OVERSCAN = 1.015;
 // (~30s+) beat instead of repeating on a fixed metronome — deliberately
 // calm, meant to read as "the leaves are responding to wind" without the
 // overlay's own motion ever being consciously noticed.
-const FOLIAGE_ROT_AMP_DEG = 0.2;
+// Foreground-foliage movement retune (browser feedback: top-left/top-right
+// foreground foliage sway read as too subtle) — all three shared amplitude
+// constants below (the only "movement amplitude" this shared signal has;
+// periods/phases are frequency, left untouched) scaled by exactly 1.30.
+// Since both FOLIAGE_LAYERS entries sample this same shared signal and
+// their own per-layer ampScale/responseLagS (below) are untouched, this
+// scales EACH layer's effective on-screen amplitude by exactly 1.30 while
+// preserving the existing 1.0x/0.9x left-right relationship and the 0/0.15s
+// response-lag difference between them.
+const FOLIAGE_ROT_AMP_DEG = 0.26; // was 0.2
 const FOLIAGE_ROT_PERIOD_S = 6.0;
 const FOLIAGE_ROT_PHASE = 0;
-const FOLIAGE_ROT_AMP_DEG_2 = 0.1;
+const FOLIAGE_ROT_AMP_DEG_2 = 0.13; // was 0.1
 const FOLIAGE_ROT_PERIOD_S_2 = 7.4;
 const FOLIAGE_ROT_PHASE_2 = 1.7;
-const FOLIAGE_X_AMP_PX = 0.75;
+const FOLIAGE_X_AMP_PX = 0.975; // was 0.75
 const FOLIAGE_X_PERIOD_S = 6.6;
 const FOLIAGE_X_PHASE = 0.8;
 
@@ -219,7 +231,7 @@ const FC_DROPDOWN_W = 280;
 
 // Shared "secondary" tone for controls that are deliberately subordinate to
 // the deep-forest primary actions and the gold END DAY/HARVEST ALL accent —
-// Cultivation's unselected segments and CHANGE VARIETY (see fixes #3/#4).
+// Cultivation's unselected segments and CHANGE LINE (see fixes #3/#4).
 const SECONDARY_BG = ORCHARD.mutedCream;
 
 // Styling pass (see PROJECT.md "Orchard UI Final Structure + Styling Pass"
@@ -241,7 +253,7 @@ const SC_H = 114;
 // source was prepared.
 const SC_FRAME_BORDER = { left: 37, right: 37, top: 40, bottom: 40 };
 
-// Lower-right Orchard action card (top row: Change Variety + Packing;
+// Lower-right Orchard action card (top row: Change Line + Packing;
 // middle row: Cultivation segmented control; bottom row: Harvest All)
 const AC_W = 460;
 const AC_H = 140;
@@ -323,11 +335,24 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   private harvestBtn: Button | null = null;
   private statValueTexts: Phaser.GameObjects.Text[] = [];
   private packingText: Phaser.GameObjects.Text | null = null;
+  // Orchard BGM (see systems/orchardBgm.ts) — one controller owned for this
+  // Container's whole lifetime, started (idempotently) whenever this screen
+  // becomes visible so switching nav tabs back to ORCHARD never restarts or
+  // duplicates playback.
+  private bgm: OrchardBgmController;
+  // Orchard leaves/wind + bird ambience (see systems/orchardAmbience.ts) —
+  // one controller owned for this Container's whole lifetime, fed the
+  // shared WindModel signal every frame from updateTrees() below. Keeps
+  // ticking regardless of which nav tab is active, matching every other
+  // Orchard ambient timer (cloud drift, wind sway, BGM) already doing that.
+  private ambience: OrchardAmbienceController;
 
   constructor(scene: Phaser.Scene, game: Game, toasts: ToastQueue) {
     super(scene, 0, LAYOUT.contentTop);
     this.game = game;
     this.toasts = toasts;
+    this.bgm = new OrchardBgmController(scene);
+    this.ambience = new OrchardAmbienceController(scene);
     // treeLayer is persistent (never torn down on render()) so fruit-reveal
     // and sway tweens can keep running smoothly between UI refreshes. Every
     // individual fruit harvest goes straight to Game.harvestFruitSlot,
@@ -411,6 +436,27 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     scene.add.existing(this);
   }
 
+  // Starts the Orchard BGM playlist (see systems/orchardBgm.ts) the moment
+  // this screen actually becomes visible — MainScene.showScreen() calls
+  // setVisible(true) every time the player navigates back to the ORCHARD
+  // tab, but OrchardBgmController.start() is itself idempotent once
+  // playback has begun, so repeated navigation never restarts the song or
+  // creates a second Sound/listener/timer. Hiding the screen intentionally
+  // leaves the playlist running rather than stopping it, matching every
+  // other Orchard ambient timer (cloud drift, background breathing, wind)
+  // that already keeps ticking independent of which nav tab is active.
+  override setVisible(value: boolean): this {
+    super.setVisible(value);
+    if (value) this.bgm.start();
+    return this;
+  }
+
+  override destroy(fromScene?: boolean): void {
+    this.bgm.destroy();
+    this.ambience.destroy();
+    super.destroy(fromScene);
+  }
+
   /**
    * Advances cloud drift by dtSeconds — called every real frame alongside
    * updateTrees() below (same persistent-timer pattern the Living Orchard
@@ -474,16 +520,34 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.treeLayer.debugTriggerWindGust();
   }
 
+  /** DEV-only: forces the leaves ambience loop on immediately at max volume, bypassing wind-driven fade-in (see systems/orchardAmbience.ts). Reachable via window.__debugOrchard.debugForceLeavesOn() in dev builds; never called from production/gameplay code. */
+  debugForceLeavesOn(): void {
+    this.ambience.debugForceLeavesOn();
+  }
+
+  /** DEV-only: immediately plays one bird clip (default index 0 = bird 1), bypassing the randomized interval (see systems/orchardAmbience.ts). Reachable via window.__debugOrchard.debugPlayBirdNow(index) in dev builds; never called from production/gameplay code. */
+  debugPlayBirdNow(index = 0): void {
+    this.ambience.debugPlayBirdNow(index);
+  }
+
+  /** DEV-only: plays the positive notification cue once, independent of any toast (see systems/notificationSfx.ts). Reachable via window.__debugOrchard.debugPlayNotification() in dev builds; never called from production/gameplay code. */
+  debugPlayNotification(): void {
+    playNotificationSfx(this.scene);
+  }
+
   /** Called every real frame from MainScene.update() so fruit-reveal/sway/cloud-drift animations progress smoothly. */
   updateTrees(dtSeconds: number): void {
     this.updateClouds(dtSeconds);
     this.updateBackgroundDrift(dtSeconds);
     this.updateForegroundFoliage(dtSeconds);
     const field = this.game.getField(this.selectedFieldId);
-    if (!field || !field.varietyId) return;
-    const variety = this.game.getVariety(field.varietyId);
-    if (!variety) return;
-    this.treeLayer.sync(field, variety, dtSeconds);
+    const variety = field?.varietyId ? this.game.getVariety(field.varietyId) : undefined;
+    if (field && variety) this.treeLayer.sync(field, variety, dtSeconds);
+    // Leaves ambience samples the SAME WindModel instance the tree sway
+    // above just advanced (see OrchardTreeLayer.windIntensity) — reads its
+    // last-known value even on the rare frame with no field/variety planted
+    // yet, rather than a second wind simulation.
+    this.ambience.updateWind(this.treeLayer.windIntensity, dtSeconds);
   }
 
   render(): void {
@@ -511,15 +575,20 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     const variety = field?.varietyId ? this.game.getVariety(field.varietyId) : undefined;
     const idx = unlockedFields.findIndex((f) => f.id === this.selectedFieldId) + 1;
     const nextId = state.fields.find((f) => !f.unlocked)?.id;
-    const showLineage = !!variety && variety.visualId !== variety.baseVisualId;
+    // Rare/Epic-signature Line — its Signature Fruit isn't the guaranteed
+    // ordinary crop (see PROJECT.md "Line Affinity System"), so the pill
+    // shows a compact affinity note rather than implying every apple looks
+    // like the Signature.
+    const showSignatureNote = !!variety && variety.visualId !== variety.baseVisualId;
 
     // Small secondary label, plain text (no panel) directly over the sky.
-    this.fieldCard.add(mkText(this.scene, FC_X, FC_Y, `FIELD ${idx} / ${unlockedFields.length}`, 13, ORCHARD.textDark, true, true));
+    this.fieldCard.add(mkText(this.scene, FC_X, FC_Y, `FIELD ${idx} / ${unlockedFields.length}`, 13, ORCHARD.textDark, true, false, ORCHARD.fontBody));
 
     // Compact deep-forest pill: [apple icon] LINE NAME ▼ — sized to its own
-    // content rather than a fixed panel width.
+    // content rather than a fixed panel width. Line name is the Cormorant
+    // Garamond display face (see PROJECT.md typography pass font-role spec).
     const lineName = variety ? variety.customName : '— NO LINE —';
-    const nameText = mkText(this.scene, 0, 0, `${lineName}  ▼`, 17, ORCHARD.textWarmLight, true);
+    const nameText = mkText(this.scene, 0, 0, `${lineName}  ▼`, 19, ORCHARD.textWarmLight, true, false, ORCHARD.fontDisplay, true);
     const pillW = FC_PILL_PAD_X + FC_ICON_PX + 8 + nameText.width + FC_PILL_PAD_X;
 
     const pillG = orchardFrame(this.scene, FC_X, FC_ROW_Y, pillW, FC_ROW_H, { radius: FC_ROW_H / 2, outerAlpha: 0.7, inner: false });
@@ -557,7 +626,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     let rightEdge = FC_X + pillW;
     if (nextId) {
       const price = this.priceForField(nextId);
-      const addLabel = mkText(this.scene, 0, 0, `+ FIELD $${price}`, 16, ORCHARD.textDark, true);
+      const addLabel = mkText(this.scene, 0, 0, `+ FIELD $${price}`, 16, ORCHARD.textDark, true, false, ORCHARD.fontBody);
       const addW = FC_PILL_PAD_X + addLabel.width + FC_PILL_PAD_X;
       const addX = rightEdge + 10;
       const addG = orchardFrame(this.scene, addX, FC_ROW_Y, addW, FC_ROW_H, { fill: ORCHARD.mutedCream, radius: FC_ROW_H / 2, outerAlpha: 0.85, inner: false });
@@ -573,16 +642,19 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     }
 
     let cursorY = FC_ROW_Y + FC_ROW_H + 8;
-    if (showLineage && variety) {
-      const note = `Growing ${catalogLabel(variety.baseVisualId)} (Special Lineage: ${catalogLabel(variety.visualId)})`;
-      const noteText = mkText(this.scene, FC_X, cursorY, note, 12, ORCHARD.textDark, true);
+    if (showSignatureNote && variety) {
+      // Section 12: "Signature: [visual] RARITY · ×weight" — the rolled
+      // rarity odds themselves stay global; this only says which visual
+      // this Line favors WITHIN its own rarity once it naturally occurs.
+      const note = `Signature: ${catalogLabel(variety.visualId)} · ${APPLE_RARITY[variety.visualId]} · ×${TUNING.LINE_SIGNATURE_AFFINITY_WEIGHT}`;
+      const noteText = mkText(this.scene, FC_X, cursorY, note, 12, ORCHARD.textDark, true, false, ORCHARD.fontBody);
       noteText.setWordWrapWidth(Math.max(rightEdge - FC_X, 260), true);
       this.fieldCard.add(noteText);
       cursorY += 22;
     }
 
     // Bottom edge of everything actually drawn (pill row + optional
-    // lineage note) — used to position the dropdown popup directly below.
+    // Signature note) — used to position the dropdown popup directly below.
     this.fieldCardHeight = cursorY - FC_Y;
   }
 
@@ -616,7 +688,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
         hi.fillRoundedRect(FC_X + 4, ry, FC_DROPDOWN_W - 8, rowH - 2, 6);
         this.fieldDropdown.add(hi);
       }
-      this.fieldDropdown.add(mkText(this.scene, FC_X + 16, ry + 8, `FIELD ${f.id} — ${label}`, 15, ORCHARD.textDark, isSelected));
+      this.fieldDropdown.add(mkText(this.scene, FC_X + 16, ry + 8, `FIELD ${f.id} — ${label}`, 15, ORCHARD.textDark, isSelected, false, ORCHARD.fontBody));
       if (f.slots.some((s) => s.ripe)) {
         this.fieldDropdown.add(this.scene.add.circle(FC_X + FC_DROPDOWN_W - 18, ry + rowH / 2 - 1, 6, 0xe0392b));
       }
@@ -647,7 +719,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
       return;
     }
     if (this.game.buyField(id)) {
-      this.toasts.show('New field purchased! You now own more orchard.', THEME.accent);
+      this.toasts.show('New field purchased! You now own more orchard.', THEME.accent, undefined, true);
       this.selectedFieldId = id;
       this.render();
     }
@@ -736,8 +808,8 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
       const iconG = this.scene.add.graphics();
       drawStatIcon(iconG, s.key, cx, y + 28);
       this.mainView.add(iconG);
-      this.mainView.add(mkText(this.scene, cx, y + 50, s.label, 11, '#8a6d1a', true, true).setOrigin(0.5));
-      const valText = mkText(this.scene, cx, y + 72, '0', 24, ORCHARD.textDark, true, true).setOrigin(0.5);
+      this.mainView.add(mkText(this.scene, cx, y + 50, s.label, 11, ORCHARD.textMutedOnCream, true, false, ORCHARD.fontBody).setOrigin(0.5));
+      const valText = mkText(this.scene, cx, y + 72, '0', 21, ORCHARD.textDark, true, false, ORCHARD.fontBody).setOrigin(0.5);
       this.mainView.add(valText);
       return valText;
     });
@@ -760,7 +832,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
 
   // ------------------------------------------------------------------
   // Lower-right Orchard action card — Cultivation (segmented control),
-  // Change Variety, Packing count/capacity, and HARVEST ALL (see
+  // Change Line, Packing count/capacity, and HARVEST ALL (see
   // PROJECT.md "LOWER-RIGHT ORCHARD ACTION CARD"). Only at-a-glance Packing
   // info is shown here; seconds/apple and upgrade cost stay behind the
   // existing Shipping Infrastructure modal.
@@ -771,7 +843,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.mainView.add(bg);
 
     // Compact three-row hierarchy (see PROJECT.md "LOWER-RIGHT ORCHARD
-    // ACTION CARD"): TOP ROW = Change Variety (secondary) + Packing
+    // ACTION CARD"): TOP ROW = Change Line (secondary) + Packing
     // (informational, click preserved); MIDDLE ROW = Cultivation segmented
     // control; BOTTOM ROW = HARVEST ALL at nearly full card width.
     const padTop = 10;
@@ -780,7 +852,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     const midRowH = 36;
     const bottomRowH = AC_H - padTop - topRowH - rowGap - midRowH - rowGap - 6;
 
-    // TOP ROW — CHANGE VARIETY: a smaller, lighter secondary action (muted
+    // TOP ROW — CHANGE LINE: a smaller, lighter secondary action (muted
     // cream, same tone as an unselected Cultivation segment) so it never
     // competes with HARVEST ALL below.
     const topRowY = y + padTop;
@@ -791,19 +863,20 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
       topRowY + topRowH / 2,
       cvW,
       topRowH,
-      'CHANGE VARIETY',
+      'CHANGE LINE',
       () => this.openVarietyPicker(field.id),
       SECONDARY_BG,
       13,
       false,
       ORCHARD.textDark,
+      ORCHARD.fontDisplay,
     );
     this.mainView.add(this.changeVarietyBtn);
 
     // TOP ROW — PACKING: mostly informational; existing click → Shipping
     // Infrastructure behavior preserved. Right-aligned against the card's
     // own right edge, filling the remaining top-row width.
-    this.packingText = mkText(this.scene, AC_X + AC_W - AC_PAD, topRowY + topRowH / 2, '', 16, ORCHARD.textDark, true, true).setOrigin(1, 0.5);
+    this.packingText = mkText(this.scene, AC_X + AC_W - AC_PAD, topRowY + topRowH / 2, '', 16, ORCHARD.textDark, true, false, ORCHARD.fontBody).setOrigin(1, 0.5);
     this.mainView.add(this.packingText);
     const packingZoneX = AC_X + AC_PAD + cvW + 8;
     const packingZoneW = AC_X + AC_W - AC_PAD - packingZoneX;
@@ -817,7 +890,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     // thin gold accent border; UNSELECTED = muted-cream "secondary" fill +
     // dark olive text.
     const midRowY = topRowY + topRowH + rowGap;
-    const cultLabel = mkText(this.scene, AC_X + AC_PAD, midRowY + midRowH / 2, 'CULTIVATION', 11, '#8a6d1a', true, true).setOrigin(0, 0.5);
+    const cultLabel = mkText(this.scene, AC_X + AC_PAD, midRowY + midRowH / 2, 'CULTIVATION', 11, ORCHARD.textMutedOnCream, true, false, ORCHARD.fontBody).setOrigin(0, 0.5);
     this.mainView.add(cultLabel);
     const segStartX = AC_X + AC_PAD + cultLabel.width + 10;
     const segEndX = AC_X + AC_W - AC_PAD;
@@ -845,6 +918,8 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
         13,
         false,
         active ? ORCHARD.textWarmLight : ORCHARD.textDark,
+        ORCHARD.fontBody,
+        active,
       );
       btn.setAccent(active);
       this.mainView.add(btn);
@@ -866,7 +941,11 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
       'HARVEST ALL',
       () => this.treeLayer.harvestAllRemaining(),
       anyRipe ? ORCHARD.forestDeep : 0x9c9484,
-      18,
+      22,
+      false,
+      ORCHARD.textWarmLight,
+      ORCHARD.fontDisplay,
+      true,
     );
     this.harvestBtn.setAccent(true);
     this.harvestBtn.setEnabled(anyRipe);
@@ -886,7 +965,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
     this.cultivationBtns.forEach(({ btn, policy }) => {
       const active = policy === effectivePolicy;
       btn.setColor(active ? ORCHARD.forestDeep : SECONDARY_BG);
-      btn.setTextColor(active ? ORCHARD.textWarmLight : ORCHARD.textDark);
+      btn.setTextColor(active ? ORCHARD.textWarmLight : ORCHARD.textDark, active);
       btn.setAccent(active);
     });
 
@@ -899,7 +978,7 @@ export class OrchardScreen extends Phaser.GameObjects.Container {
   }
 
   private openVarietyPicker(fieldId: number): void {
-    openVarietyPickerModal(this.scene, this.game, 'Choose Variety to Plant', (v) => {
+    openVarietyPickerModal(this.scene, this.game, 'Choose Line to Plant', (v) => {
       this.game.plantVariety(fieldId, v.id);
       this.render();
     });

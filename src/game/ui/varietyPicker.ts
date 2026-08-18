@@ -49,6 +49,6 @@ export function openVarietyPickerModal(
   });
 
   if (list.length === 0) {
-    modal.root.add(mkText(scene, modal.x + 32, modal.y + 100, 'No varieties available.', 22, THEME.textMid));
+    modal.root.add(mkText(scene, modal.x + 32, modal.y + 100, 'No Lines available.', 22, THEME.textMid));
   }
 }
